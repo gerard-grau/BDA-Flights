@@ -102,7 +102,7 @@ class DW:
         self.conn_pygrametl = pygrametl.ConnectionWrapper(self.conn_duckdb)
 
         # ======================================================================================================= Dimension and fact table objects
-        # NOTE: Declarations updated to use natural keys.
+        # --- Dimension Table Definitions ---
         self.dim_aircraft = CachedDimension(
             name='dim_aircraft',
             key='aircraft_id',
@@ -121,13 +121,17 @@ class DW:
             attributes=('year',)
         )
 
-        self.dim_date = SnowflakedDimension(
+        date_level_dim = CachedDimension(
             name='dim_date',
             key='date_code',
-            attributes=(), # date_code is the key, no other attributes
-            refs={'month_code': self.dim_month}
+            attributes=('month_code',)
         )
 
+        self.dim_date = SnowflakedDimension(
+            references=[(date_level_dim, self.dim_month)]
+        )
+
+        # --- Fact Table Definitions ---
         self.fact_flight_daily = FactTable(
             name='fact_flight_daily',
             keyrefs=('aircraft_id', 'date_code'),
