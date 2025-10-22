@@ -58,11 +58,11 @@ def amos() -> SQLSource:
 
 
 def aircraft_manufacturer_info() -> CSVSource:
-    return CSVSource("data/aircraft-manufacturer-info.csv", delimiter=";", header=True)
+    return CSVSource(f = open("data/aircraft-manufaturerinfo-lookup.csv"), delimiter=",")
 
 
 def maintenance_personnel_info() -> CSVSource:
-    return CSVSource("data/maintenance_personnel.csv", delimiter=";", header=True)
+    return CSVSource(f = open("data/maintenance_personnel.csv"), delimiter=",")
 
 
 # ====================================================================================================================================
