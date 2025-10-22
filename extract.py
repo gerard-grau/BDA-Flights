@@ -1,6 +1,7 @@
 from pathlib import Path
 import psycopg2
 import pandas as pd
+
 # https://pygrametl.org
 from pygrametl.datasources import CSVSource, SQLSource
 
@@ -8,7 +9,9 @@ from pygrametl.datasources import CSVSource, SQLSource
 # Connect to the PostgreSQL source
 path = Path("db_conf.txt")
 if not path.is_file():
-    raise FileNotFoundError(f"Database configuration file '{path.absolute()}' not found.")
+    raise FileNotFoundError(
+        f"Database configuration file '{path.absolute()}' not found."
+    )
 try:
     parameters = {}
     # Read the database configuration from the provided txt file, line by line
@@ -28,23 +31,62 @@ except psycopg2.Error as e:
     raise ValueError(f"Unable to connect to the database: {parameters}")
 except Exception as e:
     print(e)
-    raise ValueError(f"Database configuration file '{path.absolute()}' not properly formatted (check file 'db_conf.example.txt'.")
+    raise ValueError(
+        f"Database configuration file '{path.absolute()}' not properly formatted (check file 'db_conf.example.txt'."
+    )
 
 
 # TODO: Implement here all the extracting functions
 
 
+def aims() -> SQLSource:
+    return SQLSource(
+        connection=conn,
+        query="""
+        SELECT * FROM "AIMS".flights;
+        """,
+    )
+
+
+def amos() -> SQLSource:
+    return SQLSource(
+        connection=conn,
+        query="""
+        SELECT * FROM "AMOS";
+        """,
+    )
+
+
+def aircraft_manufacturer_info() -> CSVSource:
+    return CSVSource("data/aircraft-manufacturer-info.csv", delimiter=";", header=True)
+
+
+def maintenance_personnel_info() -> CSVSource:
+    return CSVSource("data/maintenance_personnel.csv", delimiter=";", header=True)
+
 
 # ====================================================================================================================================
 # Baseline queries
 def get_aircrafts_per_manufacturer() -> dict[str, list[str]]:
-    # TODO: Implement a function to generate a dictionary with one entry per manufacturer and a list of aircraft identifiers as values
+    '''Function to generate a dictionary with one entry per manufacturer and a list of aircraft identifiers as values.'''
+
+    df_aircrafts = pd.read_csv("aircraft-manufaturerinfo-lookup.csv")
+    manufacturers = df_aircrafts["aircraft_manufacturer"].unique()
+    aircrafts_per_manufacturer = {
+        manufacturer: df_aircrafts[
+            df_aircrafts["aircraft_manufacturer"] == manufacturer
+        ]["aircraft_model"].tolist()
+        for manufacturer in manufacturers
+    }
+
+    return aircrafts_per_manufacturer
 
 
 def query_utilization_baseline():
     aircrafts = get_aircrafts_per_manufacturer()
     cur = conn.cursor()
-    cur.execute(f"""
+    cur.execute(
+        f"""
         WITH atomic_data AS (
             SELECT f.aircraftregistration,
                 CASE 
@@ -121,7 +163,8 @@ def query_utilization_baseline():
         FROM atomic_data a
         GROUP BY a.manufacturer, a.year
         ORDER BY a.manufacturer, a.year;
-        """)
+        """
+    )
     result = cur.fetchall()
     cur.close()
     return result
@@ -130,7 +173,8 @@ def query_utilization_baseline():
 def query_reporting_baseline():
     aircrafts = get_aircrafts_per_manufacturer()
     cur = conn.cursor()
-    cur.execute(f"""
+    cur.execute(
+        f"""
         WITH 
             atomic_data_utilization AS (
                 SELECT
@@ -169,7 +213,8 @@ def query_reporting_baseline():
         FROM atomic_data_reporting f1
             JOIN atomic_data_utilization f2 ON f2.manufacturer = f1.manufacturer AND f1.year = f2.year
         ORDER BY f1.manufacturer, f1.YEAR;
-        """)
+        """
+    )
     result = cur.fetchall()
     cur.close()
     return result
@@ -178,7 +223,8 @@ def query_reporting_baseline():
 def query_reporting_per_role_baseline():
     aircrafts = get_aircrafts_per_manufacturer()
     cur = conn.cursor()
-    cur.execute(f"""
+    cur.execute(
+        f"""
         WITH 
             atomic_data_utilization AS (
                 SELECT
@@ -218,7 +264,8 @@ def query_reporting_per_role_baseline():
         FROM atomic_data_reporting f1
             JOIN atomic_data_utilization f2 ON f2.manufacturer = f1.manufacturer AND f1.year = f2.year
         ORDER BY f1.manufacturer, f1.year, f1.role;
-        """)
+        """
+    )
     result = cur.fetchall()
     cur.close()
     return result
