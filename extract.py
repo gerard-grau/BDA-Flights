@@ -15,16 +15,16 @@ if not path.is_file():
 try:
     parameters = {}
     # Read the database configuration from the provided txt file, line by line
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         lines = f.readlines()
         for line in lines:
-            parameters[line.split('=', 1)[0]] = line.split('=', 1)[1].strip()
+            parameters[line.split("=", 1)[0]] = line.split("=", 1)[1].strip()
     conn = psycopg2.connect(
-        dbname=parameters['dbname'],
-        user=parameters['user'],
-        password=parameters['password'],
-        host=parameters['ip'],
-        port=parameters['port']
+        dbname=parameters["dbname"],
+        user=parameters["user"],
+        password=parameters["password"],
+        host=parameters["ip"],
+        port=parameters["port"],
     )
 except psycopg2.Error as e:
     print(e)
@@ -37,38 +37,76 @@ except Exception as e:
 
 
 # TODO: Implement here all the extracting functions
+# Potser val la pena fer SEMPRE un ORDER BY aircraftregistration per facilitar amb python transform.py
 
 
-def aims() -> SQLSource:
+# AIMS
+def daily_flights_info() -> SQLSource:
+    """Per calcular FH, TO, DY, CN, TDM"""
+
     return SQLSource(
         connection=conn,
         query="""
-        SELECT * FROM "AIMS".flights;
+        SELECT aircraftregistration, actualdeparture, actualarrival, scheduleddeparture, delaycode, cancelled
+        FROM "AIMS".flights
+        ORDER BY aircraftregistration, actualdeparture
         """,
     )
 
 
-def amos() -> SQLSource:
+def maintenance_info() -> SQLSource:
+    """Per calcular ADOSS, ADOSU"""
+
     return SQLSource(
         connection=conn,
         query="""
-        SELECT * FROM "AMOS";
+        SELECT aircraftregistration, EXTRACT(MONTH FROM scheduleddeparture) as month, programmed, Sum(scheduleddeparture - scheduledarrival)
+        FROM "AIMS".maintenance
+        GROUP BY aircraftregistration, EXTRACT(MONTH FROM scheduleddeparture), programmed
         """,
     )
 
 
+# AMOS
+def logbook_info() -> SQLSource:
+    return SQLSource(
+        connection=conn,
+        query="""
+        SELECT aircraftregistration, reporteurclass, reporteurid, EXTRACT(MONTH FROM reportingdate) as month, Count(*)
+        FROM "AMOS".technicallogbookorders
+        GROUP BY aircraftregistration, reporteurid, reporteurclass, EXTRACT(MONTH FROM reportingdate)
+        """,
+    )  # Posar ORDER BY workerid, aircraftregistration? Fa falta fer group by reporteurclass? (i.e. potser pots fer SELECT(?) as reporteurclass)
+    # I què passa amb aeroport? => Granularitat és DAY, no MONTH (treure GROUP BY month)
+
+
+# CSV
 def aircraft_manufacturer_info() -> CSVSource:
-    return CSVSource(f = open("data/aircraft-manufaturerinfo-lookup.csv"), delimiter=",")
+    return CSVSource(f=open("data/aircraft-manufaturerinfo-lookup.csv"), delimiter=",")
 
 
 def maintenance_personnel_info() -> CSVSource:
-    return CSVSource(f = open("data/maintenance_personnel.csv"), delimiter=",")
+    return CSVSource(f=open("data/maintenance_personnel.csv"), delimiter=",")
+
+
+# Per fer test
+
+if __name__ == "__main__":
+
+    res1 = daily_flights_info()
+    res2 = maintenance_info()
+    res3 = logbook_info()
+
+    for i, row in enumerate(res1):
+        print(row)
+        if i == 3:
+            break
 
 
 # ====================================================================================================================================
 # Baseline queries
 def get_aircrafts_per_manufacturer() -> dict[str, list[str]]:
-    '''Function to generate a dictionary with one entry per manufacturer and a list of aircraft identifiers as values.'''
+    """Function to generate a dictionary with one entry per manufacturer and a list of aircraft identifiers as values."""
 
     df_aircrafts = pd.read_csv("aircraft-manufaturerinfo-lookup.csv")
     manufacturers = df_aircrafts["aircraft_manufacturer"].unique()
