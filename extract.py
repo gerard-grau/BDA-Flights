@@ -37,12 +37,13 @@ except Exception as e:
 
 
 # TODO: Implement here all the extracting functions
-# Potser val la pena fer SEMPRE un ORDER BY aircraftregistration per facilitar amb python transform.py
 
 
 # AIMS
-def daily_flights_info() -> SQLSource:
+def flights_info() -> SQLSource:
     """Per calcular FH, TO, DY, CN, TDM"""
+
+    # TODO: hauries de canviar-li el nom (encara NO és daily)
 
     return SQLSource(
         connection=conn,
@@ -60,9 +61,9 @@ def maintenance_info() -> SQLSource:
     return SQLSource(
         connection=conn,
         query="""
-        SELECT aircraftregistration, EXTRACT(MONTH FROM scheduleddeparture) as month, programmed, Sum(scheduleddeparture - scheduledarrival)
+        SELECT aircraftregistration, CEXTRACT(YEAR_MONTH FROM scheduleddeparture) as month, programmed, Sum(scheduledarrival - scheduleddeparture) as delay  
         FROM "AIMS".maintenance
-        GROUP BY aircraftregistration, EXTRACT(MONTH FROM scheduleddeparture), programmed
+        GROUP BY aircraftregistration, EXTRACT(YEAR_MONTH FROM scheduleddeparture), programmed
         """,
     )
 
@@ -72,9 +73,9 @@ def logbook_info() -> SQLSource:
     return SQLSource(
         connection=conn,
         query="""
-        SELECT aircraftregistration, reporteurclass, reporteurid, EXTRACT(MONTH FROM reportingdate) as month, Count(*)
+        SELECT aircraftregistration, reporteurclass, reporteurid, EXTRACT(YEAR_MONTH FROM reportingdate) as month, Count(*)
         FROM "AMOS".technicallogbookorders
-        GROUP BY aircraftregistration, reporteurid, reporteurclass, EXTRACT(MONTH FROM reportingdate)
+        GROUP BY aircraftregistration, reporteurid, reporteurclass, EXTRACT(YEAR_MONTH FROM reportingdate)
         """,
     )  # Posar ORDER BY workerid, aircraftregistration? Fa falta fer group by reporteurclass? (i.e. potser pots fer SELECT(?) as reporteurclass)
     # I què passa amb aeroport? => Granularitat és DAY, no MONTH (treure GROUP BY month)
