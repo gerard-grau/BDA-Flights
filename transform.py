@@ -410,12 +410,17 @@ def transform_flights(flights_source, aircraft_csv_data):
 def transform_maintenance(maintenance_source):
     """
     Complete transformation pipeline for maintenance data.
-    Returns: maintenance_monthly (with ADOSS and ADOSU)
+    Returns: maintenance_monthly (with ADOSS and ADOSU aggregated by aircraft+month)
     """
     df = stage_data(maintenance_source)
     df = compute_ADOSS(df)
     df = compute_ADOSU(df)
-    return df
+    
+    # Aggregate by aircraft and month (sum ADOSS and ADOSU)
+    return df.groupby(["aircraftregistration", "month"]).agg(
+        ADOSS=("ADOSS", "sum"),
+        ADOSU=("ADOSU", "sum")
+    ).reset_index()
 
 
 def transform_logbook(logbook_source, aircraft_csv_data, personnel_csv_data):
