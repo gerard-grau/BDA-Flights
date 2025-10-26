@@ -56,26 +56,29 @@ def flights_info() -> SQLSource:
 
 
 def maintenance_info() -> SQLSource:
-    """Per calcular ADOSS, ADOSU"""
+    """Extract maintenance data to calculate ADOSS, ADOSU"""
 
     return SQLSource(
         connection=conn,
         query="""
-        SELECT aircraftregistration, CEXTRACT(YEAR_MONTH FROM scheduleddeparture) as month, programmed, Sum(scheduledarrival - scheduleddeparture) as delay  
+        SELECT aircraftregistration, EXTRACT(YEAR_MONTH FROM scheduleddeparture) as month, programmed, SUM(scheduledarrival - scheduleddeparture) as total_delay_duration  
         FROM "AIMS".maintenance
         GROUP BY aircraftregistration, EXTRACT(YEAR_MONTH FROM scheduleddeparture), programmed
+        ORDER BY aircraftregistration, month
         """,
     )
 
 
 # AMOS
 def logbook_info() -> SQLSource:
+    """Per calcular RRh, RRc (report rates)"""
     return SQLSource(
         connection=conn,
         query="""
-        SELECT aircraftregistration, reporteurclass, reporteurid, EXTRACT(YEAR_MONTH FROM reportingdate) as month, Count(*)
+        SELECT aircraftregistration, reporteurclass, reporteurid, EXTRACT(YEAR_MONTH FROM reportingdate) as month, Count(*) as logbook_entries
         FROM "AMOS".technicallogbookorders
         GROUP BY aircraftregistration, reporteurid, reporteurclass, EXTRACT(YEAR_MONTH FROM reportingdate)
+        ORDER BY aircraftregistration, reporteurid, month
         """,
     )  # Posar ORDER BY workerid, aircraftregistration? Fa falta fer group by reporteurclass? (i.e. potser pots fer SELECT(?) as reporteurclass)
     # I què passa amb aeroport? => Granularitat és DAY, no MONTH (treure GROUP BY month)
@@ -94,7 +97,7 @@ def maintenance_personnel_info() -> CSVSource:
 
 if __name__ == "__main__":
 
-    res1 = daily_flights_info()
+    res1 = flights_info()
     res2 = maintenance_info()
     res3 = logbook_info()
 
@@ -107,14 +110,14 @@ if __name__ == "__main__":
 # ====================================================================================================================================
 # Baseline queries
 def get_aircrafts_per_manufacturer() -> dict[str, list[str]]:
-    """Function to generate a dictionary with one entry per manufacturer and a list of aircraft identifiers as values."""
+    """Function to generate a dictionary with one entry per manufacturer and a list of aircraft registration codes as values."""
 
-    df_aircrafts = pd.read_csv("aircraft-manufaturerinfo-lookup.csv")
+    df_aircrafts = pd.read_csv("data/aircraft-manufaturerinfo-lookup.csv")
     manufacturers = df_aircrafts["aircraft_manufacturer"].unique()
     aircrafts_per_manufacturer = {
         manufacturer: df_aircrafts[
             df_aircrafts["aircraft_manufacturer"] == manufacturer
-        ]["aircraft_model"].tolist()
+        ]["aircraft_reg_code"].tolist()
         for manufacturer in manufacturers
     }
 
