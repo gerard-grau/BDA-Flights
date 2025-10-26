@@ -1,6 +1,7 @@
 from tqdm import tqdm
 import logging
 import pandas as pd
+from pygrametl.datasources import CSVSource
 
 # Configure logging
 LOG_FILE = "cleaning.log"
@@ -77,19 +78,19 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
     return stagingDB.drop(deletedIndexes)
 
 
-def enhance_BR3(logbookDB, valid_aircraft_set) -> pd.DataFrame:
+def enhance_BR3(postflightreportsDB, valid_aircraft_codes: set[str]) -> pd.DataFrame:
     """
     Apply Business Rule 3: 
     The aircraft registration in a post flight report must be an aircraft.
     Fix: Ignore the report, but record the row in a log file
     """
-    invalid_mask = ~logbookDB["aircraftregistration"].isin(valid_aircraft_set)
+    invalid_mask = ~postflightreportsDB["aircraftregistration"].isin(valid_aircraft_codes)
     
-    for _, row in logbookDB[invalid_mask].iterrows():
+    for _, row in postflightreportsDB[invalid_mask].iterrows():
         logging.info(f"BR3 violation - Invalid aircraft registration in logbook: "
-                   f"Aircraft {row['aircraftregistration']}, Reporter {row['reporteurid']}")
+                   f"Aircraft {row['aircraftregistration']}, Reporteur {row['reporteurid']}")
     
-    return logbookDB[~invalid_mask]
+    return postflightreportsDB[~invalid_mask]
 
 
 # ==============================================================================
@@ -153,7 +154,7 @@ def aggregate_by_time(stagingDB, granularity) -> pd.DataFrame:
     """
     return stagingDB.groupby(["aircraftregistration", granularity]).agg(
         FH=("FH", "sum"),
-        TO=("cancelled", lambda x: len(x) - sum(x)),
+        TO=("cancelled", lambda x: sum(~x)),
         CN=("cancelled", "sum"),
         DY=("delaycode", lambda x: sum(~x.isna())),
         TDM=("TDM", "sum")
@@ -205,7 +206,7 @@ def merge_ADOS(flightDB, maintenanceDB) -> pd.DataFrame:
 # PHASE 7: Data Enrichment (Lookups)
 # ==============================================================================
 
-def enrich_aircraft_manufacturer(dataDB, aircraft_csv_data) -> pd.DataFrame:
+def enrich_aircraft_manufacturer(dataDB, aircraft_csv_data: CSVSource) -> pd.DataFrame:
     """
     Enrich data with aircraft manufacturer information.
     Adds: model, manufacturer columns
@@ -224,32 +225,23 @@ def enrich_aircraft_manufacturer(dataDB, aircraft_csv_data) -> pd.DataFrame:
     }).drop(columns=["aircraft_reg_code"])
 
 
-def enrich_maintenance_personnel(logbookDB, personnel_csv_data) -> pd.DataFrame:
+def enrich_maintenance_personnel(logbookDB, personnel_df: pd.DataFrame) -> pd.DataFrame:
     """
     Enrich logbook data with maintenance personnel airport information.
     If reporteurid is in personnel CSV -> it's maintenance (MAREP), add airport
     If reporteurid is NOT in CSV -> it's a pilot (PIREP), no airport
     """
-    personnel_df = pd.DataFrame(list(personnel_csv_data)) if not isinstance(personnel_csv_data, pd.DataFrame) else personnel_csv_data
     
-    id_col, airport_col = personnel_df.columns[0], personnel_df.columns[1]
-    
-    logbookDB["reporteurid"] = logbookDB["reporteurid"].astype(str)
-    personnel_df[id_col] = personnel_df[id_col].astype(str)
+    personnel_df['reporteurid'] = personnel_df['reporteurid'].astype(int)
     
     enrichedDB = pd.merge(
         logbookDB,
-        personnel_df[[id_col, airport_col]],
+        personnel_df[['reporteurid', 'airport']],
         left_on="reporteurid",
-        right_on=id_col,
+        right_on='reporteurid',
         how="left"
-    ).rename(columns={airport_col: "airport_code"})
-    
-    if id_col != "reporteurid":
-        enrichedDB = enrichedDB.drop(columns=[id_col])
-    
-    enrichedDB["airport_code"] = enrichedDB["airport_code"].fillna("")
-    
+    ).rename(columns={'airport': "airport_code"})
+        
     return enrichedDB
 
 
@@ -262,46 +254,38 @@ def prepare_dim_aircraft(aircraft_csv_data) -> pd.DataFrame:
     Prepare aircraft dimension table.
     Returns: aircraft_id, model, manufacturer
     """
-    aircraft_df = pd.DataFrame(list(aircraft_csv_data)) if not isinstance(aircraft_csv_data, pd.DataFrame) else aircraft_csv_data
+    aircraft_df = pd.DataFrame(list(aircraft_csv_data))
     
     return aircraft_df[["aircraft_reg_code", "aircraft_model", "aircraft_manufacturer"]].rename(columns={
         "aircraft_reg_code": "aircraft_id",
         "aircraft_model": "model",
         "aircraft_manufacturer": "manufacturer"
-    }).drop_duplicates(subset=["aircraft_id"])
+    })
 
 
-def prepare_dim_reporter(logbookDB, personnel_csv_data) -> pd.DataFrame:
+def prepare_dim_reporteur(logbookDB, personnel_df) -> pd.DataFrame:
     """
-    Prepare reporter dimension table.
-    Returns: reporter_id, type (PIREP/MAREP), airport_code
+    Prepare reporteur dimension table.
+    Returns: reporteur_id, type (PIREP/MAREP), airport_code
     """
-    personnel_df = pd.DataFrame(list(personnel_csv_data)) if not isinstance(personnel_csv_data, pd.DataFrame) else personnel_csv_data
     
-    reporters = logbookDB[["reporteurid", "reporteurclass"]].drop_duplicates().rename(columns={
-        "reporteurid": "reporter_id",
+    reporteurs = logbookDB[["reporteurid", "reporteurclass"]].drop_duplicates().rename(columns={
+        "reporteurid": "reporteur_id",
         "reporteurclass": "type"
     })
-    
-    reporters["reporter_id"] = reporters["reporter_id"].astype(str)
-    
-    id_col, airport_col = personnel_df.columns[0], personnel_df.columns[1]
-    personnel_df[id_col] = personnel_df[id_col].astype(str)
-    
-    dim_reporter = pd.merge(
-        reporters,
-        personnel_df[[id_col, airport_col]],
-        left_on="reporter_id",
-        right_on=id_col,
+        
+    dim_reporteur = pd.merge(
+        reporteurs,
+        personnel_df[['reporteurid', 'airport']],
+        left_on="reporteur_id",
+        right_on='reporteurid',
         how="left"
-    ).rename(columns={airport_col: "airport_code"}).drop(columns=[id_col])
+    ).rename(columns={'airport': "airport_code"}).drop(columns=['reporteurid'])
     
-    dim_reporter["airport_code"] = dim_reporter["airport_code"].fillna("")
-    
-    return dim_reporter
+    return dim_reporteur
 
 
-def prepare_dim_date(dates_list) -> pd.DataFrame:
+def prepare_dim_date(dates_list: list) -> pd.DataFrame:
     """
     Prepare date dimension table.
     Returns: date_code, month_code
@@ -347,7 +331,7 @@ def prepare_fact_flight_monthly(aggregatedDB, maintenanceDB) -> pd.DataFrame:
     """
     Prepare monthly flight fact table with maintenance data merged.
     Returns: aircraft_id, month_code, flight_hours, flight_cycles, 
-             adis, adoss, adosu, delays, cancellations, total_delay_minutes
+             adoss, adosu, delays, cancellations, total_delay_minutes
     """
     fact_monthly = merge_ADOS(aggregatedDB, maintenanceDB).rename(columns={
         "aircraftregistration": "aircraft_id",
@@ -360,25 +344,23 @@ def prepare_fact_flight_monthly(aggregatedDB, maintenanceDB) -> pd.DataFrame:
         "CN": "cancellations",
         "TDM": "total_delay_minutes"
     })
-    
-    fact_monthly["adis"] = 0  # Will be calculated in queries
-    
+        
     return fact_monthly[[
         "aircraft_id", "month_code", "flight_hours", "flight_cycles",
-        "adis", "adoss", "adosu", "delays", "cancellations", "total_delay_minutes"
+        "adoss", "adosu", "delays", "cancellations", "total_delay_minutes"
     ]]
 
 
 def prepare_fact_logbook(logbookDB) -> pd.DataFrame:
     """
     Prepare logbook fact table.
-    Returns: aircraft_id, month_code, reporter_id, logbook_entries
+    Returns: aircraft_id, month_code, reporteur_id, logbook_entries
     """
     return logbookDB.rename(columns={
         "aircraftregistration": "aircraft_id",
         "month": "month_code",
-        "reporteurid": "reporter_id"
-    })[["aircraft_id", "month_code", "reporter_id", "logbook_entries"]]
+        "reporteurid": "reporteur_id"
+    })[["aircraft_id", "month_code", "reporteur_id", "logbook_entries"]]
 
 
 # ==============================================================================
@@ -426,19 +408,23 @@ def transform_maintenance(maintenance_source):
 def transform_logbook(logbook_source, aircraft_csv_data, personnel_csv_data):
     """
     Complete transformation pipeline for logbook data.
-    Returns: (fact_logbook, dim_reporter)
+    Returns: (fact_logbook, dim_reporteur)
     """
-    personnel_df = pd.DataFrame(list(personnel_csv_data)) if not isinstance(personnel_csv_data, pd.DataFrame) else personnel_csv_data
-    aircraft_df = pd.DataFrame(list(aircraft_csv_data)) if not isinstance(aircraft_csv_data, pd.DataFrame) else aircraft_csv_data
+    personnel_df = pd.DataFrame(list(personnel_csv_data))
+    aircraft_df = pd.DataFrame(list(aircraft_csv_data))
     
-    df = stage_data(logbook_source)
-    df = enhance_BR3(df, set(aircraft_df["aircraft_reg_code"].tolist()))
-    df = enrich_maintenance_personnel(df, personnel_df)
+    logbook_df = stage_data(logbook_source)
+    logbook_df = enhance_BR3(logbook_df, set(aircraft_df["aircraft_reg_code"].tolist()))
+    logbook_df = enrich_maintenance_personnel(logbook_df, personnel_df)
     
-    fact_logbook = prepare_fact_logbook(df)
-    dim_reporter = prepare_dim_reporter(df, personnel_df)
+    fact_logbook = prepare_fact_logbook(logbook_df)
+    dim_reporteur = prepare_dim_reporteur(logbook_df, personnel_df)
     
-    return fact_logbook, dim_reporter
+    return fact_logbook, dim_reporteur
+
+
+def extract_all():
+    ...
 
 
 # ==============================================================================
@@ -484,15 +470,15 @@ if __name__ == "__main__":
     # Test logbook transformation
     print("\n" + "-" * 80)
     print("Testing logbook transformation...")
-    fact_logbook, dim_reporter = transform_logbook(
+    fact_logbook, dim_reporteur = transform_logbook(
         extract.logbook_info(),
         extract.aircraft_manufacturer_info(),
         extract.maintenance_personnel_info()
     )
     print(f"Fact Logbook shape: {fact_logbook.shape}")
     print(fact_logbook.head())
-    print(f"\nDim Reporter shape: {dim_reporter.shape}")
-    print(dim_reporter.head())
+    print(f"\nDim Reporteur shape: {dim_reporteur.shape}")
+    print(dim_reporteur.head())
     
     # Test dimensions
     print("\n" + "-" * 80)

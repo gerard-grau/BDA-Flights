@@ -89,6 +89,21 @@ def logbook_info() -> SQLSource:
         """,
     )
 
+def post_flight_reports() -> SQLSource:
+    """Per calcular RRh, RRc (report rates)"""
+    return SQLSource(
+        connection=conn,
+        query="""
+        SELECT aircraftregistration, 
+               reporteurclass, 
+               reporteurid, 
+               TO_CHAR(reportingdate, 'YYYY-MM') as month, 
+               Count(*) as logbook_entries
+        FROM "AMOS".postflightreports
+        GROUP BY aircraftregistration, reporteurid, reporteurclass, TO_CHAR(reportingdate, 'YYYY-MM')
+        ORDER BY aircraftregistration, reporteurid, month
+        """,
+    )
 
 # CSV
 def aircraft_manufacturer_info() -> CSVSource:
