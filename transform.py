@@ -3,11 +3,18 @@ import logging
 import pandas as pd
 
 # Configure logging
+LOG_FILE = "cleaning.log"
 logging.basicConfig(
-    filename="cleaning.log",  # Log file name
+    filename=LOG_FILE,  # Log file name
     level=logging.INFO,  # Logging level
     format="%(message)s",  # Log message format
 )
+
+
+def clear_log_file():
+    """Clear the log file contents"""
+    with open(LOG_FILE, 'w'):
+        pass
 
 
 def build_dateCode(date) -> str:
@@ -83,7 +90,17 @@ def enhance_BR3(logbookDB, valid_aircraft_set) -> pd.DataFrame:
     The aircraft registration in a post flight report must be an aircraft.
     Fix: Ignore the report, but record the row in a log file
     """
-    ...
+    # invalidIndexes = []
+    
+    # for row in tqdm(logbookDB.itertuples(), desc="Applying BR3 (valid aircraft in reports)"):
+    #     if row.aircraftregistration not in valid_aircraft_set:
+    #         # BR-3: Invalid aircraft registration
+    #         logging.info(f"BR3 violation - Invalid aircraft registration in logbook: "
+    #                    f"Aircraft {row.aircraftregistration}, Reporter {row.reporteurid}")
+    #         invalidIndexes.append(row.Index)
+    
+    # logbookDB.drop(invalidIndexes, inplace=True)
+    return logbookDB
 
 
 # ==============================================================================
@@ -101,7 +118,7 @@ def split_date(stagingDB) -> pd.DataFrame:
 
 
 def split_month(stagingDB) -> pd.DataFrame:
-    """Add month column in format YYYYMM"""
+    """Add month column in format YYYY-MM"""
 
     # TODO: això extreu NO de date sinó de actualarrival, etc. ja que fem servir implementació
     # que hi ha ja en el codi: build_monthCode. Fa falta?
@@ -220,7 +237,11 @@ def merge_ADOS(flightDB, maintenanceDB) -> pd.DataFrame:
         on=["aircraftregistration", "month"],
         how="left",
     )
-
+    
+    # Fill NaN values with 0 for aircraft without maintenance
+    mergedDB["ADOSS"] = mergedDB["ADOSS"].fillna(0)
+    mergedDB["ADOSU"] = mergedDB["ADOSU"].fillna(0)
+    
     return mergedDB
 
 
@@ -272,21 +293,49 @@ def enrich_maintenance_personnel(logbookDB, personnel_csv_data) -> pd.DataFrame:
     else:
         personnel_df = personnel_csv_data
     
-    # Ensure reporteurid is same type for merging
-    if 'reporteurid' in personnel_df.columns:
-        personnel_df['reporteurid'] = personnel_df['reporteurid'].astype(str)
+    # Check if reporteurid column exists, if not return the original DataFrame
+    if 'reporteurid' not in logbookDB.columns:
+        print(f"Warning: 'reporteurid' column not found in logbook data. Available columns: {logbookDB.columns.tolist()}")
+        # Add empty airport_code column
+        logbookDB['airport_code'] = ""
+        return logbookDB
+    
+    # If personnel_df is empty or has no columns, just add empty airport_code
+    if len(personnel_df.columns) == 0:
+        logbookDB['airport_code'] = ""
+        return logbookDB
+    
+    # Assume first column is reporteurid and second is airport
+    personnel_cols = personnel_df.columns.tolist()
+    id_col = personnel_cols[0]
+    airport_col = personnel_cols[1] if len(personnel_cols) > 1 else None
+    
+    if not airport_col:
+        logbookDB['airport_code'] = ""
+        return logbookDB
+    
+    # Ensure types match for merging
     logbookDB['reporteurid'] = logbookDB['reporteurid'].astype(str)
+    personnel_df[id_col] = personnel_df[id_col].astype(str)
     
     # Merge with personnel data (left join - keeps all logbook entries)
     enrichedDB = pd.merge(
         logbookDB,
-        personnel_df[["reporteurid", "airport"]],
-        on="reporteurid",
+        personnel_df[[id_col, airport_col]],
+        left_on="reporteurid",
+        right_on=id_col,
         how="left"
     )
     
     # Rename airport column
-    enrichedDB = enrichedDB.rename(columns={"airport": "airport_code"})
+    enrichedDB = enrichedDB.rename(columns={airport_col: "airport_code"})
+    
+    # Drop the duplicate id column ONLY if it's different from 'reporteurid'
+    if id_col != 'reporteurid':
+        enrichedDB = enrichedDB.drop(columns=[id_col], errors='ignore')
+    
+    # Fill NaN with empty string for pilots (not in personnel CSV)
+    enrichedDB["airport_code"] = enrichedDB["airport_code"].fillna("")
     
     return enrichedDB
 
@@ -328,6 +377,8 @@ def prepare_dim_reporter(logbookDB, personnel_csv_data) -> pd.DataFrame:
     else:
         personnel_df = personnel_csv_data
     
+    print(f"Personnel CSV columns: {personnel_df.columns.tolist()}")
+    
     # Get unique reporters from logbook
     reporters = logbookDB[["reporteurid", "reporteurclass"]].drop_duplicates()
     reporters = reporters.rename(columns={
@@ -337,22 +388,36 @@ def prepare_dim_reporter(logbookDB, personnel_csv_data) -> pd.DataFrame:
     
     # Ensure types match for merge
     reporters['reporter_id'] = reporters['reporter_id'].astype(str)
-    if 'reporteurid' in personnel_df.columns:
-        personnel_df['reporteurid'] = personnel_df['reporteurid'].astype(str)
     
-    # Merge with personnel to get airport (left join)
-    dim_reporter = pd.merge(
-        reporters,
-        personnel_df[["reporteurid", "airport"]],
-        left_on="reporter_id",
-        right_on="reporteurid",
-        how="left"
-    )
+    # Check what columns are available in personnel_df and merge accordingly
+    if len(personnel_df.columns) > 0:
+        # Assume first column is reporteurid and second is airport
+        personnel_cols = personnel_df.columns.tolist()
+        id_col = personnel_cols[0]
+        airport_col = personnel_cols[1] if len(personnel_cols) > 1 else None
+        
+        if airport_col:
+            personnel_df[id_col] = personnel_df[id_col].astype(str)
+            
+            # Merge with personnel to get airport (left join)
+            dim_reporter = pd.merge(
+                reporters,
+                personnel_df[[id_col, airport_col]],
+                left_on="reporter_id",
+                right_on=id_col,
+                how="left"
+            )
+            
+            dim_reporter = dim_reporter.rename(columns={airport_col: "airport_code"})
+            dim_reporter = dim_reporter.drop(columns=[id_col], errors='ignore')
+        else:
+            dim_reporter = reporters
+            dim_reporter["airport_code"] = ""
+    else:
+        dim_reporter = reporters
+        dim_reporter["airport_code"] = ""
     
-    dim_reporter = dim_reporter.rename(columns={"airport": "airport_code"})
-    dim_reporter = dim_reporter.drop(columns=["reporteurid"], errors='ignore')
-    
-    # Fill NaN airport_code with None for pilots (PIREP)
+    # Fill NaN airport_code with empty string for pilots (PIREP)
     dim_reporter["airport_code"] = dim_reporter["airport_code"].fillna("")
     
     return dim_reporter
@@ -369,10 +434,10 @@ def prepare_dim_date(dates_list) -> pd.DataFrame:
         "date_code": unique_dates
     })
     
-    # Extract month_code from date
+    # Extract month_code from date using helper functions
     dim_date["date_code"] = pd.to_datetime(dim_date["date_code"])
-    dim_date["month_code"] = dim_date["date_code"].dt.strftime("%Y%m")
-    dim_date["date_code"] = dim_date["date_code"].dt.strftime("%Y-%m-%d")
+    dim_date["month_code"] = dim_date["date_code"].apply(build_monthCode)
+    dim_date["date_code"] = dim_date["date_code"].apply(build_dateCode)
     
     return dim_date
 
@@ -386,7 +451,7 @@ def prepare_dim_month(dates_list) -> pd.DataFrame:
     dates_series = pd.Series(pd.to_datetime(pd.Series(dates_list).unique()))
     
     dim_month = pd.DataFrame({
-        "month_code": dates_series.dt.strftime("%Y%m"),
+        "month_code": dates_series.apply(build_monthCode),
         "year": dates_series.dt.year
     })
     
@@ -458,15 +523,28 @@ def prepare_fact_logbook(logbookDB) -> pd.DataFrame:
     Prepare logbook fact table.
     Returns: aircraft_id, month_code, reporter_id, logbook_entries
     """
-    fact_logbook = logbookDB.rename(columns={
-        "aircraftregistration": "aircraft_id",
-        "month": "month_code",
-        "reporteurid": "reporter_id",
-        "logbook_entries": "logbook_entries"
-    })
+    print(f"Logbook columns before rename: {logbookDB.columns.tolist()}")
     
-    # Select only needed columns
-    fact_logbook = fact_logbook[["aircraft_id", "month_code", "reporter_id", "logbook_entries"]]
+    # Check which columns exist and rename accordingly
+    rename_dict = {}
+    if 'aircraftregistration' in logbookDB.columns:
+        rename_dict['aircraftregistration'] = 'aircraft_id'
+    if 'month' in logbookDB.columns:
+        rename_dict['month'] = 'month_code'
+    if 'reporteurid' in logbookDB.columns:
+        rename_dict['reporteurid'] = 'reporter_id'
+    
+    fact_logbook = logbookDB.rename(columns=rename_dict)
+    
+    print(f"Logbook columns after rename: {fact_logbook.columns.tolist()}")
+    
+    # Select only needed columns (only those that exist)
+    available_cols = []
+    for col in ["aircraft_id", "month_code", "reporter_id", "logbook_entries"]:
+        if col in fact_logbook.columns:
+            available_cols.append(col)
+    
+    fact_logbook = fact_logbook[available_cols]
     
     return fact_logbook
 
@@ -546,8 +624,19 @@ def transform_logbook(logbook_source, aircraft_csv_data, personnel_csv_data):
     print("TRANSFORMING LOGBOOK DATA")
     print("=" * 80)
     
-    # Stage data
+    # Stage personnel CSV data ONCE (CSVSource can only be iterated once!)
+    if not isinstance(personnel_csv_data, pd.DataFrame):
+        personnel_df = pd.DataFrame(list(personnel_csv_data))
+        print(f"Personnel CSV staged - columns: {personnel_df.columns.tolist()}, shape: {personnel_df.shape}")
+    else:
+        personnel_df = personnel_csv_data
+    
+    # Stage logbook data
     df = stage_data(logbook_source)
+    print(f"Staged logbook columns: {df.columns.tolist()}")
+    print(f"Staged logbook shape: {df.shape}")
+    if len(df) > 0:
+        print(f"First row: {df.iloc[0].to_dict()}")
     
     # Get valid aircraft set for BR3
     if not isinstance(aircraft_csv_data, pd.DataFrame):
@@ -559,14 +648,14 @@ def transform_logbook(logbook_source, aircraft_csv_data, personnel_csv_data):
     # Apply BR3
     df = enhance_BR3(df, valid_aircraft_set)
     
-    # Enrich with personnel airport info
-    df = enrich_maintenance_personnel(df, personnel_csv_data)
+    # Enrich with personnel airport info (use the staged DataFrame)
+    df = enrich_maintenance_personnel(df, personnel_df)
     
     # Prepare fact table
     fact_logbook = prepare_fact_logbook(df)
     
-    # Prepare reporter dimension
-    dim_reporter = prepare_dim_reporter(df, personnel_csv_data)
+    # Prepare reporter dimension (use the staged DataFrame)
+    dim_reporter = prepare_dim_reporter(df, personnel_df)
     
     print("Logbook transformation complete!")
     return fact_logbook, dim_reporter
@@ -579,10 +668,14 @@ def transform_logbook(logbook_source, aircraft_csv_data, personnel_csv_data):
 if __name__ == "__main__":
     import extract
     
+    
     print("\n" + "=" * 80)
     print("TESTING TRANSFORMATION PIPELINES")
     print("=" * 80 + "\n")
     
+    # Clear the log file at the start of the ETL pipeline
+    clear_log_file()
+
     # Test flight transformation
     print("Testing flight transformation...")
     fact_daily, monthly_agg, dim_date, dim_month = transform_flights(

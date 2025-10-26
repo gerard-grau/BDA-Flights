@@ -61,9 +61,12 @@ def maintenance_info() -> SQLSource:
     return SQLSource(
         connection=conn,
         query="""
-        SELECT aircraftregistration, EXTRACT(YEAR_MONTH FROM scheduleddeparture) as month, programmed, SUM(scheduledarrival - scheduleddeparture) as total_delay_duration  
+        SELECT aircraftregistration, 
+               TO_CHAR(scheduleddeparture, 'YYYY-MM') as month, 
+               programmed, 
+               SUM(scheduledarrival - scheduleddeparture) as total_delay_duration  
         FROM "AIMS".maintenance
-        GROUP BY aircraftregistration, EXTRACT(YEAR_MONTH FROM scheduleddeparture), programmed
+        GROUP BY aircraftregistration, TO_CHAR(scheduleddeparture, 'YYYY-MM'), programmed
         ORDER BY aircraftregistration, month
         """,
     )
@@ -75,13 +78,16 @@ def logbook_info() -> SQLSource:
     return SQLSource(
         connection=conn,
         query="""
-        SELECT aircraftregistration, reporteurclass, reporteurid, EXTRACT(YEAR_MONTH FROM reportingdate) as month, Count(*) as logbook_entries
+        SELECT aircraftregistration, 
+               reporteurclass, 
+               reporteurid, 
+               TO_CHAR(reportingdate, 'YYYY-MM') as month, 
+               Count(*) as logbook_entries
         FROM "AMOS".technicallogbookorders
-        GROUP BY aircraftregistration, reporteurid, reporteurclass, EXTRACT(YEAR_MONTH FROM reportingdate)
+        GROUP BY aircraftregistration, reporteurid, reporteurclass, TO_CHAR(reportingdate, 'YYYY-MM')
         ORDER BY aircraftregistration, reporteurid, month
         """,
-    )  # Posar ORDER BY workerid, aircraftregistration? Fa falta fer group by reporteurclass? (i.e. potser pots fer SELECT(?) as reporteurclass)
-    # I què passa amb aeroport? => Granularitat és DAY, no MONTH (treure GROUP BY month)
+    )
 
 
 # CSV
