@@ -31,8 +31,8 @@ class DW:
                     );
                     """,
                     """
-                    CREATE TABLE dim_reporter (
-                        reporter_id VARCHAR PRIMARY KEY,
+                    CREATE TABLE dim_reporteur (
+                        reporteur_id INTEGER PRIMARY KEY,
                         type VARCHAR,
                         airport_code VARCHAR
                     );
@@ -67,7 +67,6 @@ class DW:
                         month_code VARCHAR NOT NULL,
                         flight_hours DECIMAL(10, 2),
                         flight_cycles INTEGER,
-                        adis DECIMAL(10, 2),
                         adoss DECIMAL(10, 2),
                         adosu DECIMAL(10, 2),
                         delays INTEGER,
@@ -82,12 +81,12 @@ class DW:
                     CREATE TABLE fact_logbook (
                         aircraft_id VARCHAR NOT NULL,
                         month_code VARCHAR NOT NULL,
-                        reporter_id VARCHAR NOT NULL,
+                        reporteur_id INTEGER NOT NULL,
                         logbook_entries INTEGER,
                         FOREIGN KEY (aircraft_id) REFERENCES dim_aircraft(aircraft_id),
                         FOREIGN KEY (month_code) REFERENCES dim_month(month_code),
-                        FOREIGN KEY (reporter_id) REFERENCES dim_reporter(reporter_id),
-                        PRIMARY KEY (aircraft_id, month_code, reporter_id)
+                        FOREIGN KEY (reporteur_id) REFERENCES dim_reporteur(reporteur_id),
+                        PRIMARY KEY (aircraft_id, month_code, reporteur_id)
                     );
                     """
                 ]
@@ -109,9 +108,9 @@ class DW:
             attributes=('model', 'manufacturer')
         )
 
-        self.dim_reporter = CachedDimension(
-            name='dim_reporter',
-            key='reporter_id',
+        self.dim_reporteur = CachedDimension(
+            name='dim_reporteur',
+            key='reporteur_id',
             attributes=('type', 'airport_code')
         )
 
@@ -141,13 +140,13 @@ class DW:
         self.fact_flight_monthly = FactTable(
             name='fact_flight_monthly',
             keyrefs=('aircraft_id', 'month_code'),
-            measures=('flight_hours', 'flight_cycles', 'adis', 'adoss', 'adosu',
+            measures=('flight_hours', 'flight_cycles', 'adoss', 'adosu',
                       'delays', 'cancellations', 'total_delay_minutes')
         )
 
         self.fact_logbook = FactTable(
             name='fact_logbook',
-            keyrefs=('aircraft_id', 'month_code', 'reporter_id'),
+            keyrefs=('aircraft_id', 'month_code', 'reporteur_id'),
             measures=('logbook_entries',)
         )
 
@@ -230,7 +229,7 @@ class DW:
                     FROM fact_logbook fl
                     JOIN dim_aircraft da ON fl.aircraft_id = da.aircraft_id
                     JOIN dim_month dm ON fl.month_code = dm.month_code
-                    JOIN dim_reporter dr ON fl.reporter_id = dr.reporter_id
+                    JOIN dim_reporteur dr ON fl.reporteur_id = dr.reporteur_id
                     GROUP BY da.manufacturer, dm.year, dr.type
                 ),
                 monthly_utilization AS (

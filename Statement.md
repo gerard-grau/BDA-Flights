@@ -144,7 +144,7 @@ Below you can find the business rules that one would expect to be true in the da
 
 - **BR-6** subsystem of MaintenanceEvents should be a 4 digits ATA code[^3]
 - **BR-7** delayCode in OperationInterruption should be a 2 digits IATA code[^4]
-- **BR-8** ReportKind values "PIREP" and "MAREP" refer to pilot and maintenance personnel as reporters, respectively.
+- **BR-8** ReportKind values "PIREP" and "MAREP" refer to pilot and maintenance personnel as reporteurs, respectively.
 - **BR-9** MELCathegory values A, B, C, D refer to 3, 10, 30, 120 days of allowed delay in the repairing of the problem in the aircraft, respectively.
 - **BR-10** airport in MaintenanceEvents must have a value.
 
