@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Generator, Literal
 from tqdm import tqdm
 import logging
 import pandas as pd
@@ -33,33 +33,73 @@ def build_monthCode(date) -> str:
 # PHASE 1: Data Pre-Processing and Staging
 # ==============================================================================
 
-def stage_data(data_source: UnionSource) -> pd.DataFrame:
+def stage_data(data_source: UnionSource | Generator) -> pd.DataFrame:
     """Stage data into a DataFrame"""
     return pd.DataFrame(list(data_source))
-    rows = []
-    for row in tqdm(data_source, desc="Staging data into pandas dataframe"):
-        rows.append(row)
-    return pd.DataFrame.from_dict(rows)
+
+
+def pre_process_flights(flights_source: SQLSource):
+    """
+    Generator that lazily processes flight data row by row without storing in memory.
+    Applies BR1, computes date, month, FH (Flight Hours), and TDM (Total Delay Minutes) on-the-fly.
+    Yields one row at a time - memory efficient for large datasets.
+    """
+    for row in tqdm(flights_source, desc="Pre-processing flight data"):
+        # Business Rule 1 (BR-23): actualArrival must be posterior to actualDeparture
+        if not row["cancelled"] and row["actualdeparture"] > row["actualarrival"]:
+            # Swap their values
+            row["actualdeparture"], row["actualarrival"] = row["actualarrival"], row["actualdeparture"]
+        
+        # Date/Time transformations
+        reference_date = row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]
+        row["date"] = build_dateCode(reference_date)
+        row["month"] = build_monthCode(reference_date)
+        
+        # Metric calculations
+        if not row["cancelled"]:
+            row["FH"] = (row["actualarrival"] - row["actualdeparture"]).total_seconds() / 3600
+        else:
+            row["FH"] = 0
+        
+        if pd.notna(row.get("delaycode")):
+            row["TDM"] = (row["actualdeparture"] - row["scheduleddeparture"]).total_seconds() / 60
+        else:
+            row["TDM"] = 0
+        
+        yield row
 
 
 def stage_flights(flights_source: SQLSource) -> pd.DataFrame:
     """
     Stage and prepare flight data with sorting.
+    Uses lazy generator for preprocessing (date, month, FH, TDM) to avoid intermediate memory storage.
     Materializes data into memory only when sorting is required.
     """
-    flights_df = pd.DataFrame(list(flights_source))
+    flights_df = stage_data(pre_process_flights(flights_source))
     return flights_df.sort_values(by=["aircraftregistration", "actualdeparture"])
 
 
 def pre_process_maintenance(maintenance_source: SQLSource):
     """
     Generator that lazily processes maintenance data row by row without storing in memory.
-    Computes month and total_delay_duration on-the-fly for each row.
+    Computes month, total_delay_duration, ADOSS, and ADOSU on-the-fly for each row.
     Yields one row at a time - memory efficient for large datasets.
     """
     for row in tqdm(maintenance_source, desc="Pre-processing maintenance data"):
+        # Date/Time transformation
         row["month"] = build_monthCode(row["scheduleddeparture"])
+        
+        # Calculate total delay duration
         row["total_delay_duration"] = row["scheduledarrival"] - row["scheduleddeparture"]
+        
+        # Metric calculations - ADOSS and ADOSU
+        if row["programmed"]:
+            row["ADOSS"] = round((row["total_delay_duration"].days + row["total_delay_duration"].seconds / 86400), 2)
+            row["ADOSU"] = 0.0
+        else:
+            row["ADOSS"] = 0.0
+            row["ADOSU"] = round((row["total_delay_duration"].days + row["total_delay_duration"].seconds / 86400), 2)
+        
         yield row
 
 
@@ -70,37 +110,46 @@ def stage_maintenance(maintenance_source: SQLSource) -> pd.DataFrame:
     Materializes to DataFrame only when aggregation is required.
     """
     # Lazy processing through generator - no intermediate storage
-    maintenance_df = pd.DataFrame(list(pre_process_maintenance(maintenance_source)))
+    maintenance_df = stage_data(pre_process_maintenance(maintenance_source))
     
-    # Group by aircraft, month, and programmed flag
+    # Group by aircraft and month, summing ADOSS and ADOSU
     aggregated = maintenance_df.groupby(
-        ["aircraftregistration", "month", "programmed"]
+        ["aircraftregistration", "month"]
     ).agg(
-        total_delay_duration=("total_delay_duration", "sum")
+        ADOSS=("ADOSS", "sum"),
+        ADOSU=("ADOSU", "sum")
     ).reset_index()
     
     return aggregated.sort_values(by=["aircraftregistration", "month"])
 
 
-def pre_process_post_flight_reports(reports_source: SQLSource):
+def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str]):
     """
     Generator that lazily processes post flight reports row by row without storing in memory.
-    Computes month on-the-fly for each row.
+    Applies BR3 (validates aircraft registration), computes month on-the-fly for each row.
     Yields one row at a time - memory efficient for large datasets.
+    Invalid aircraft registrations are logged and filtered out.
     """
     for row in tqdm(reports_source, desc="Pre-processing post-flight reports"):
+        # Business Rule 3: aircraft registration must be valid
+        if row["aircraftregistration"] not in valid_aircraft_codes:
+            logging.info(f"BR3 violation - Invalid aircraft registration in logbook: "
+                       f"Aircraft {row['aircraftregistration']}, Reporteur {row['reporteurid']}")
+            continue  # Skip this row
+        
+        # Date/Time transformation
         row["month"] = build_monthCode(row["reportingdate"])
         yield row
 
 
-def stage_post_flight_reports(reports_source: SQLSource) -> pd.DataFrame:
+def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str]) -> pd.DataFrame:
     """
     Stage and prepare post flight reports with aggregation and sorting.
-    Uses lazy generator for preprocessing to avoid intermediate memory storage.
+    Uses lazy generator for preprocessing (applies BR3, computes month) to avoid intermediate memory storage.
     Materializes to DataFrame only when aggregation is required.
     """
     # Lazy processing through generator - no intermediate storage
-    reports_df = pd.DataFrame(list(pre_process_post_flight_reports(reports_source)))
+    reports_df = stage_data(pre_process_post_flight_reports(reports_source, valid_aircraft_codes))
     
     # Group by aircraft, reporteur, and month to count entries
     aggregated = reports_df.groupby(
@@ -113,17 +162,6 @@ def stage_post_flight_reports(reports_source: SQLSource) -> pd.DataFrame:
 # ==============================================================================
 # PHASE 2: Business Rules (Data Quality)
 # ==============================================================================
-
-def enhance_BR1(stagingDB) -> pd.DataFrame:
-    """
-    Apply Business Rule 1 (BR-23): 
-    In a Flight, actualArrival is posterior to actualDeparture.
-    Fix: Swap their values
-    """
-    mask = stagingDB["actualdeparture"] > stagingDB["actualarrival"]
-    stagingDB.loc[mask, ["actualdeparture", "actualarrival"]] = stagingDB.loc[mask, ["actualarrival", "actualdeparture"]].values
-    return stagingDB
-
 
 def enhance_BR2(stagingDB) -> pd.DataFrame:
     """
@@ -148,71 +186,6 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
     return stagingDB.drop(deletedIndexes)
 
 
-def enhance_BR3(postflightreportsDB: pd.DataFrame, valid_aircraft_codes: set[str]) -> pd.DataFrame:
-    """
-    Apply Business Rule 3: 
-    The aircraft registration in a post flight report must be an aircraft.
-    Fix: Ignore the report, but record the row in a log file
-    """
-    invalid_mask = ~postflightreportsDB["aircraftregistration"].isin(valid_aircraft_codes)
-    
-    for _, row in postflightreportsDB[invalid_mask].iterrows():
-        logging.info(f"BR3 violation - Invalid aircraft registration in logbook: "
-                   f"Aircraft {row['aircraftregistration']}, Reporteur {row['reporteurid']}")
-    
-    return postflightreportsDB[~invalid_mask]
-
-
-# ==============================================================================
-# PHASE 3: Date/Time Transformations
-# ==============================================================================
-
-def split_date(stagingDB: pd.DataFrame) -> pd.DataFrame:
-    """Add date column in format YYYY-MM-DD"""
-    stagingDB["date"] = stagingDB.apply(
-        lambda row: build_dateCode(row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]),
-        axis=1
-    )
-    return stagingDB
-
-
-def split_month(stagingDB: pd.DataFrame) -> pd.DataFrame:
-    """Add month column in format YYYY-MM"""
-    stagingDB["month"] = stagingDB.apply(
-        lambda row: build_monthCode(row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]),
-        axis=1
-    )
-    return stagingDB
-
-
-# ==============================================================================
-# PHASE 4: Metric Calculations
-# ==============================================================================
-
-def compute_FH(stagingDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate Flight Hours (FH) in HOURS.
-    FH = actualArrival - actualDeparture (for non-cancelled flights)
-    """
-    stagingDB["FH"] = stagingDB.apply(
-        lambda row: (row["actualarrival"] - row["actualdeparture"]).total_seconds() / 3600 if not row["cancelled"] else 0,
-        axis=1
-    )
-    return stagingDB
-
-
-def compute_TDM(stagingDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate Total Delay Minutes (TDM) in MINUTES.
-    TDM = actualDeparture - scheduledDeparture (for delayed flights)
-    """
-    stagingDB["TDM"] = stagingDB.apply(
-        lambda row: (row["actualdeparture"] - row["scheduleddeparture"]).total_seconds() / 60 if pd.notna(row["delaycode"]) else 0,
-        axis=1
-    )
-    return stagingDB
-
-
 # ==============================================================================
 # PHASE 5: Aggregation Functions
 # ==============================================================================
@@ -234,30 +207,6 @@ def aggregate_by_time(stagingDB: pd.DataFrame, granularity: Literal['date', 'mon
 # ==============================================================================
 # PHASE 6: Maintenance Data Transformations
 # ==============================================================================
-
-def compute_ADOSS(maintenanceDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute ADOSS (Aircraft Days Out of Service - Scheduled) from maintenanceDB.
-    ADOSS = scheduled maintenance duration in days
-    """
-    maintenanceDB["ADOSS"] = maintenanceDB.apply(
-        lambda row: round((row["total_delay_duration"].days + row["total_delay_duration"].seconds / 86400), 2) if row["programmed"] else 0.0,
-        axis=1
-    )
-    return maintenanceDB
-
-
-def compute_ADOSU(maintenanceDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute ADOSU (Aircraft Days Out of Service - Unscheduled) from maintenanceDB.
-    ADOSU = unscheduled maintenance duration in days
-    """
-    maintenanceDB["ADOSU"] = maintenanceDB.apply(
-        lambda row: round((row["total_delay_duration"].days + row["total_delay_duration"].seconds / 86400), 2) if not row["programmed"] else 0.0,
-        axis=1
-    )
-    return maintenanceDB
-
 
 def merge_ADOS(flightDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFrame:
     """
@@ -438,16 +387,14 @@ def prepare_fact_logbook(logbookDB: pd.DataFrame) -> pd.DataFrame:
 def transform_flights(flights_source: SQLSource, aircraft_df: pd.DataFrame):
     """
     Complete transformation pipeline for flight data.
+    BR1, date, month, FH, and TDM are computed during pre-processing (lazy evaluation).
     Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month)
     """
     df = stage_flights(flights_source)
-    df = enhance_BR1(df)
+    # Note: BR1 already applied in pre_process_flights
     df = enhance_BR2(df)
     df = enrich_aircraft_manufacturer(df, aircraft_df)
-    df = split_date(df)
-    df = split_month(df)
-    df = compute_FH(df)
-    df = compute_TDM(df)
+    # Note: date, month, FH, TDM already computed in pre_process_flights
     
     fact_daily = prepare_fact_flight_daily(aggregate_by_time(df, "date"))
     monthly_agg = aggregate_by_time(df, "month")
@@ -460,28 +407,27 @@ def transform_flights(flights_source: SQLSource, aircraft_df: pd.DataFrame):
 def transform_maintenance(maintenance_source: SQLSource):
     """
     Complete transformation pipeline for maintenance data.
+    Month, total_delay_duration, ADOSS, and ADOSU are computed during pre-processing (lazy evaluation).
+    Aggregation by aircraft+month is done in staging.
     Returns: maintenance_monthly (with ADOSS and ADOSU aggregated by aircraft+month)
     """
-    df = stage_maintenance(maintenance_source)
-    df = compute_ADOSS(df)
-    df = compute_ADOSU(df)
-    
-    # Aggregate by aircraft and month (sum ADOSS and ADOSU)
-    return df.groupby(["aircraftregistration", "month"]).agg(
-        ADOSS=("ADOSS", "sum"),
-        ADOSU=("ADOSU", "sum")
-    ).reset_index()
+    # All processing and aggregation already done in stage_maintenance
+    return stage_maintenance(maintenance_source)
 
 
 def transform_logbook(logbook_source: SQLSource, aircraft_df: pd.DataFrame, personnel_csv_data: CSVSource):
     """
     Complete transformation pipeline for logbook data.
+    BR3 and month are computed during pre-processing (lazy evaluation).
     Returns: (fact_logbook, dim_reporteur)
     """
     personnel_df = pd.DataFrame(list(personnel_csv_data))
     
-    logbook_df = stage_post_flight_reports(logbook_source)
-    logbook_df = enhance_BR3(logbook_df, set(aircraft_df["aircraft_reg_code"].tolist()))
+    # Pass valid aircraft codes to staging for BR3 validation during pre-processing
+    valid_aircraft_codes = set(aircraft_df["aircraft_reg_code"].tolist())
+    logbook_df = stage_post_flight_reports(logbook_source, valid_aircraft_codes)
+    # Note: BR3 already applied in pre_process_post_flight_reports
+    
     logbook_df = enrich_maintenance_personnel(logbook_df, personnel_df)
     
     fact_logbook = prepare_fact_logbook(logbook_df)
