@@ -42,6 +42,7 @@ def pre_process_flights(flights_source: SQLSource, aircraft_lookup: dict[str, di
     """
     Generator that lazily processes flight data row by row without storing in memory.
     Applies BR1, enriches with aircraft manufacturer info, computes date, month, FH, and TDM on-the-fly.
+    Adds helper flags for efficient aggregation. Yields only necessary columns.
     Yields one row at a time - memory efficient for large datasets.
     
     Args:
@@ -70,10 +71,19 @@ def pre_process_flights(flights_source: SQLSource, aircraft_lookup: dict[str, di
         else:
             row["FH"] = 0
         
-        if pd.notna(row.get("delaycode")):
+        is_delayed = pd.notna(row.get("delaycode"))
+        if is_delayed:
             row["TDM"] = (row["actualdeparture"] - row["scheduleddeparture"]).total_seconds() / 60
         else:
             row["TDM"] = 0
+        
+        # Helper flags for efficient aggregation (replaces lambda functions)
+        row["is_takeoff"] = 0 if row["cancelled"] else 1  # For counting takeoffs (TO)
+        row["is_delayed"] = 1 if is_delayed else 0  # For counting delays (DY)
+        
+        # Drop unused columns to save memory
+        row.pop("scheduleddeparture")
+        row.pop("delaycode")
         
         yield row
 
@@ -96,22 +106,27 @@ def pre_process_maintenance(maintenance_source: SQLSource):
     """
     Generator that lazily processes maintenance data row by row without storing in memory.
     Computes month, total_delay_duration, ADOSS, and ADOSU on-the-fly for each row.
-    Yields one row at a time - memory efficient for large datasets.
+    Drops unused columns - memory efficient for large datasets.
     """
     for row in tqdm(maintenance_source, desc="Pre-processing maintenance data"):
         # Date/Time transformation
         row["month"] = build_monthCode(row["scheduleddeparture"])
         
         # Calculate total delay duration
-        row["total_delay_duration"] = row["scheduledarrival"] - row["scheduleddeparture"]
+        total_delay_duration = row["scheduledarrival"] - row["scheduleddeparture"]
         
         # Metric calculations - ADOSS and ADOSU
         if row["programmed"]:
-            row["ADOSS"] = round((row["total_delay_duration"].days + row["total_delay_duration"].seconds / 86400), 2)
+            row["ADOSS"] = round((total_delay_duration.days + total_delay_duration.seconds / 86400), 2)
             row["ADOSU"] = 0.0
         else:
             row["ADOSS"] = 0.0
-            row["ADOSU"] = round((row["total_delay_duration"].days + row["total_delay_duration"].seconds / 86400), 2)
+            row["ADOSU"] = round((total_delay_duration.days + total_delay_duration.seconds / 86400), 2)
+        
+        # Drop unused columns to save memory
+        row.pop("scheduleddeparture")
+        row.pop("scheduledarrival")
+        row.pop("programmed")
         
         yield row
 
@@ -140,7 +155,7 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
     """
     Generator that lazily processes post flight reports row by row without storing in memory.
     Applies BR3 (validates aircraft registration), enriches with personnel info, computes month on-the-fly.
-    Yields one row at a time - memory efficient for large datasets.
+    Drops unused columns - memory efficient for large datasets.
     Invalid aircraft registrations are logged and filtered out.
     
     Args:
@@ -160,6 +175,10 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
         
         # Date/Time transformation
         row["month"] = build_monthCode(row["reportingdate"])
+        
+        # Drop unused columns to save memory
+        row.pop("reportingdate")
+        
         yield row
 
 
@@ -209,7 +228,7 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
         
         prev_row = row
     
-    return stagingDB.drop(deletedIndexes)
+    return stagingDB.drop(deletedIndexes).drop(columns=["actualdeparture", "actualarrival"])
 
 
 # ==============================================================================
@@ -219,13 +238,14 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
 def aggregate_by_time(stagingDB: pd.DataFrame, granularity: Literal['date', 'month']) -> pd.DataFrame:
     """
     Aggregate flight data by day or month.
+    Uses pre-computed helper flags (is_takeoff, is_delayed) for efficient aggregation.
     Returns: aircraftregistration, date/month, FH, TO (TakeOffs), CN (Cancellations), DY (Delays), TDM
     """
     return stagingDB.groupby(["aircraftregistration", granularity]).agg(
         FH=("FH", "sum"),
-        TO=("cancelled", lambda x: sum(~x)),
+        TO=("is_takeoff", "sum"),
         CN=("cancelled", "sum"),
-        DY=("delaycode", lambda x: sum(~x.isna())),
+        DY=("is_delayed", "sum"),
         TDM=("TDM", "sum")
     ).reset_index()
 
@@ -244,7 +264,7 @@ def merge_ADOS(flightDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFr
         maintenanceDB[["aircraftregistration", "month", "ADOSS", "ADOSU"]],
         on=["aircraftregistration", "month"],
         how="left"
-    ).fillna({"ADOSS": 0, "ADOSU": 0})
+    )
 
 
 # ==============================================================================
