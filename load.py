@@ -113,11 +113,13 @@ if __name__ == "__main__":
     # Clear log file
     transform.clear_log_file()
     
+    aircraft_df = pd.DataFrame(list(extract.aircraft_manufacturer_info()))
+
     # Extract and Transform
     print("Running transformations...")
     fact_daily, monthly_agg, dim_date, dim_month = transform.transform_flights(
         extract.flights_info(),
-        extract.aircraft_manufacturer_info()
+        aircraft_df
     )
     
     maintenance_monthly = transform.transform_maintenance(extract.maintenance_info())
@@ -125,11 +127,11 @@ if __name__ == "__main__":
     
     fact_logbook, dim_reporteur = transform.transform_logbook(
         extract.post_flight_reports(),
-        extract.aircraft_manufacturer_info(),
+        aircraft_df,
         extract.maintenance_personnel_info()
     )
     
-    dim_aircraft = transform.prepare_dim_aircraft(extract.aircraft_manufacturer_info())
+    dim_aircraft = transform.prepare_dim_aircraft(aircraft_df)
     
     # Create DW and Load
     print("\nCreating Data Warehouse...")

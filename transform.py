@@ -1,16 +1,12 @@
-from typing import Generator, Literal
+from typing import Literal
 from tqdm import tqdm
 import logging
 import pandas as pd
-from pygrametl.datasources import CSVSource , SQLSource, UnionSource
+from pygrametl.datasources import CSVSource, SQLSource
 
 # Configure logging
 LOG_FILE = "cleaning.log"
-logging.basicConfig(
-    filename=LOG_FILE,  # Log file name
-    level=logging.INFO,  # Logging level
-    format="%(message)s",  # Log message format
-)
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(message)s")
 
 
 def clear_log_file():
@@ -30,35 +26,19 @@ def build_monthCode(date) -> str:
 
 
 # ==============================================================================
-# PHASE 1: Data Pre-Processing and Staging
+# PHASE 1: Data Pre-Processing
 # ==============================================================================
 
-def stage_data(data_source: UnionSource | Generator) -> pd.DataFrame:
-    """Stage data into a DataFrame"""
-    return pd.DataFrame(list(data_source))
-
-
-def pre_process_flights(flights_source: SQLSource, aircraft_lookup: dict[str, dict]):
+def pre_process_flights(flights_source: SQLSource):
     """
-    Generator that lazily processes flight data row by row without storing in memory.
-    Applies BR1, enriches with aircraft manufacturer info, computes date, month, FH, and TDM on-the-fly.
-    Adds helper flags for efficient aggregation. Yields only necessary columns.
-    Yields one row at a time - memory efficient for large datasets.
-    
-    Args:
-        flights_source: SQL source for flight data
-        aircraft_lookup: Dict mapping aircraft_reg_code -> {model, manufacturer}
+    Generator that processes flight data row-by-row (memory efficient).
+    Applies BR1, computes date/month/FH/TDM, adds aggregation flags.
     """
     for row in tqdm(flights_source, desc="Pre-processing flight data"):
         # Business Rule 1 (BR-23): actualArrival must be posterior to actualDeparture
         if not row["cancelled"] and row["actualdeparture"] > row["actualarrival"]:
             # Swap their values
             row["actualdeparture"], row["actualarrival"] = row["actualarrival"], row["actualdeparture"]
-        
-        # Enrich with aircraft manufacturer information (dictionary lookup - O(1))
-        aircraft_info = aircraft_lookup.get(row["aircraftregistration"], {})
-        row["model"] = aircraft_info.get("model")
-        row["manufacturer"] = aircraft_info.get("manufacturer")
         
         # Date/Time transformations
         reference_date = row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]
@@ -88,25 +68,16 @@ def pre_process_flights(flights_source: SQLSource, aircraft_lookup: dict[str, di
         yield row
 
 
-def stage_flights(flights_source: SQLSource, aircraft_lookup: dict[str, dict]) -> pd.DataFrame:
-    """
-    Stage and prepare flight data with sorting.
-    Uses lazy generator for preprocessing (BR1, enrichment, date, month, FH, TDM) to avoid intermediate memory storage.
-    Materializes data into memory only when sorting is required.
-    
-    Args:
-        flights_source: SQL source for flight data
-        aircraft_lookup: Dict mapping aircraft_reg_code -> {model, manufacturer}
-    """
-    flights_df = stage_data(pre_process_flights(flights_source, aircraft_lookup))
+def stage_flights(flights_source: SQLSource) -> pd.DataFrame:
+    """Stage and sort flight data. Pre-processes with BR1, date, month, FH, TDM."""
+    flights_df = pd.DataFrame(list(pre_process_flights(flights_source)))
     return flights_df.sort_values(by=["aircraftregistration", "actualdeparture"])
 
 
 def pre_process_maintenance(maintenance_source: SQLSource):
     """
-    Generator that lazily processes maintenance data row by row without storing in memory.
-    Computes month, total_delay_duration, ADOSS, and ADOSU on-the-fly for each row.
-    Drops unused columns - memory efficient for large datasets.
+    Generator that processes maintenance data row-by-row (memory efficient).
+    Computes month, ADOSS, and ADOSU metrics.
     """
     for row in tqdm(maintenance_source, desc="Pre-processing maintenance data"):
         # Date/Time transformation
@@ -132,13 +103,8 @@ def pre_process_maintenance(maintenance_source: SQLSource):
 
 
 def stage_maintenance(maintenance_source: SQLSource) -> pd.DataFrame:
-    """
-    Stage and prepare maintenance data with aggregation and sorting.
-    Uses lazy generator for preprocessing to avoid intermediate memory storage.
-    Materializes to DataFrame only when aggregation is required.
-    """
-    # Lazy processing through generator - no intermediate storage
-    maintenance_df = stage_data(pre_process_maintenance(maintenance_source))
+    """Stage, aggregate, and sort maintenance data. Pre-processes with month, ADOSS, ADOSU."""
+    maintenance_df = pd.DataFrame(list(pre_process_maintenance(maintenance_source)))
     
     # Group by aircraft and month, summing ADOSS and ADOSU
     aggregated = maintenance_df.groupby(
@@ -151,17 +117,10 @@ def stage_maintenance(maintenance_source: SQLSource) -> pd.DataFrame:
     return aggregated.sort_values(by=["aircraftregistration", "month"])
 
 
-def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str], personnel_lookup: dict[int, str]):
+def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str]):
     """
-    Generator that lazily processes post flight reports row by row without storing in memory.
-    Applies BR3 (validates aircraft registration), enriches with personnel info, computes month on-the-fly.
-    Drops unused columns - memory efficient for large datasets.
-    Invalid aircraft registrations are logged and filtered out.
-    
-    Args:
-        reports_source: SQL source for post-flight reports
-        valid_aircraft_codes: Set of valid aircraft registration codes
-        personnel_lookup: Dict mapping reporteurid -> airport_code
+    Generator that processes post-flight reports row-by-row (memory efficient).
+    Applies BR3 (validates aircraft), computes month.
     """
     for row in tqdm(reports_source, desc="Pre-processing post-flight reports"):
         # Business Rule 3: aircraft registration must be valid
@@ -169,9 +128,6 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
             logging.info(f"BR3 violation - Invalid aircraft registration in logbook: "
                        f"Aircraft {row['aircraftregistration']}, Reporteur {row['reporteurid']}")
             continue  # Skip this row
-        
-        # Enrich with maintenance personnel information (dictionary lookup - O(1))
-        row["airport_code"] = personnel_lookup.get(row["reporteurid"])
         
         # Date/Time transformation
         row["month"] = build_monthCode(row["reportingdate"])
@@ -182,19 +138,9 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
         yield row
 
 
-def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str], personnel_lookup: dict[int, str]) -> pd.DataFrame:
-    """
-    Stage and prepare post flight reports with aggregation and sorting.
-    Uses lazy generator for preprocessing (applies BR3, enriches personnel, computes month) to avoid intermediate memory storage.
-    Materializes to DataFrame only when aggregation is required.
-    
-    Args:
-        reports_source: SQL source for post-flight reports
-        valid_aircraft_codes: Set of valid aircraft registration codes
-        personnel_lookup: Dict mapping reporteurid -> airport_code
-    """
-    # Lazy processing through generator - no intermediate storage
-    reports_df = stage_data(pre_process_post_flight_reports(reports_source, valid_aircraft_codes, personnel_lookup))
+def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str]) -> pd.DataFrame:
+    """Stage, aggregate, and sort logbook reports. Pre-processes with BR3, month."""
+    reports_df = pd.DataFrame(list(pre_process_post_flight_reports(reports_source, valid_aircraft_codes)))
     
     # Group by aircraft, reporteur, and month to count entries
     aggregated = reports_df.groupby(
@@ -210,10 +156,8 @@ def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: s
 
 def enhance_BR2(stagingDB) -> pd.DataFrame:
     """
-    Apply Business Rule 2 (BR-21): 
-    Two non-cancelled flights of the same aircraft cannot overlap.
-    Fix: Ignore the first flight, but record the row in a log file
-    Assumes rows are ordered by aircraftregistration, actualdeparture
+    Apply Business Rule 2 (BR-21): Two non-cancelled flights of the same aircraft cannot overlap.
+    Fix: Remove the earlier overlapping flight and log it.
     """
     deletedIndexes = []
     prev_row = None
@@ -232,16 +176,12 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
 
 
 # ==============================================================================
-# PHASE 5: Aggregation Functions
+# PHASE 3: Aggregation Functions
 # ==============================================================================
 
-def aggregate_by_time(stagingDB: pd.DataFrame, granularity: Literal['date', 'month']) -> pd.DataFrame:
-    """
-    Aggregate flight data by day or month.
-    Uses pre-computed helper flags (is_takeoff, is_delayed) for efficient aggregation.
-    Returns: aircraftregistration, date/month, FH, TO (TakeOffs), CN (Cancellations), DY (Delays), TDM
-    """
-    return stagingDB.groupby(["aircraftregistration", granularity]).agg(
+def aggregate_by_aircraft_and_time(stagingDB: pd.DataFrame, time_granularity: Literal['date', 'month']) -> pd.DataFrame:
+    """Aggregate flight data by day or month."""
+    return stagingDB.groupby(["aircraftregistration", time_granularity]).agg(
         FH=("FH", "sum"),
         TO=("is_takeoff", "sum"),
         CN=("cancelled", "sum"),
@@ -251,32 +191,11 @@ def aggregate_by_time(stagingDB: pd.DataFrame, granularity: Literal['date', 'mon
 
 
 # ==============================================================================
-# PHASE 6: Maintenance Data Transformations
-# ==============================================================================
-
-def merge_ADOS(flightDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge ADOSS and ADOSU from maintenanceDB into flight aggregated data.
-    Fill missing values with 0 (aircraft with no maintenance in that month)
-    """
-    return pd.merge(
-        flightDB,
-        maintenanceDB[["aircraftregistration", "month", "ADOSS", "ADOSU"]],
-        on=["aircraftregistration", "month"],
-        how="left"
-    )
-
-
-# ==============================================================================
-# PHASE 8: Dimension Table Preparation
+# PHASE 4: Dimension and Fact Table Preparation
 # ==============================================================================
 
 def prepare_dim_aircraft(aircraft_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare aircraft dimension table.
-    Returns: aircraft_id, model, manufacturer
-    """
-    
+    """Prepare aircraft dimension table."""
     return aircraft_df[["aircraft_reg_code", "aircraft_model", "aircraft_manufacturer"]].rename(columns={
         "aircraft_reg_code": "aircraft_id",
         "aircraft_model": "model",
@@ -285,32 +204,23 @@ def prepare_dim_aircraft(aircraft_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_dim_reporteur(logbookDB: pd.DataFrame, personnel_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare reporteur dimension table.
-    Returns: reporteur_id, type (PIREP/MAREP), airport_code
-    """
-    
+    """Prepare reporteur dimension table."""
     reporteurs = logbookDB[["reporteurid", "reporteurclass"]].drop_duplicates().rename(columns={
         "reporteurid": "reporteur_id",
         "reporteurclass": "type"
     })
-        
-    dim_reporteur = pd.merge(
+    
+    return pd.merge(
         reporteurs,
         personnel_df[['reporteurid', 'airport']],
         left_on="reporteur_id",
         right_on='reporteurid',
         how="left"
     ).rename(columns={'airport': "airport_code"}).drop(columns=['reporteurid'])
-    
-    return dim_reporteur
 
 
 def prepare_dim_date(dates_list: list) -> pd.DataFrame:
-    """
-    Prepare date dimension table.
-    Returns: date_code, month_code
-    """
+    """Prepare date dimension table."""
     dim_date = pd.DataFrame({"date_code": pd.Series(dates_list).unique()})
     dim_date["date_code"] = pd.to_datetime(dim_date["date_code"])
     dim_date["month_code"] = dim_date["date_code"].apply(build_monthCode)
@@ -319,10 +229,7 @@ def prepare_dim_date(dates_list: list) -> pd.DataFrame:
 
 
 def prepare_dim_month(dates_list: list) -> pd.DataFrame:
-    """
-    Prepare month dimension table.
-    Returns: month_code, year
-    """
+    """Prepare month dimension table."""
     dates_series = pd.Series(pd.to_datetime(pd.Series(dates_list).unique()))
     
     return pd.DataFrame({
@@ -331,15 +238,8 @@ def prepare_dim_month(dates_list: list) -> pd.DataFrame:
     }).drop_duplicates(subset=["month_code"])
 
 
-# ==============================================================================
-# PHASE 9: Fact Table Preparation
-# ==============================================================================
-
 def prepare_fact_flight_daily(aggregatedDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare daily flight fact table.
-    Returns: aircraft_id, date_code, flight_hours, flight_cycles
-    """
+    """Prepare daily flight fact table."""
     return aggregatedDB.rename(columns={
         "aircraftregistration": "aircraft_id",
         "date": "date_code",
@@ -349,12 +249,14 @@ def prepare_fact_flight_daily(aggregatedDB: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_fact_flight_monthly(aggregatedDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare monthly flight fact table with maintenance data merged.
-    Returns: aircraft_id, month_code, flight_hours, flight_cycles, 
-             adoss, adosu, delays, cancellations, total_delay_minutes
-    """
-    fact_monthly = merge_ADOS(aggregatedDB, maintenanceDB).rename(columns={
+    """Prepare monthly flight fact table with maintenance data merged."""
+    # Merge ADOSS and ADOSU from maintenanceDB
+    fact_monthly = pd.merge(
+        aggregatedDB,
+        maintenanceDB[["aircraftregistration", "month", "ADOSS", "ADOSU"]],
+        on=["aircraftregistration", "month"],
+        how="left"
+    ).rename(columns={
         "aircraftregistration": "aircraft_id",
         "month": "month_code",
         "FH": "flight_hours",
@@ -373,10 +275,7 @@ def prepare_fact_flight_monthly(aggregatedDB: pd.DataFrame, maintenanceDB: pd.Da
 
 
 def prepare_fact_logbook(logbookDB: pd.DataFrame) -> pd.DataFrame:
-    """
-    Prepare logbook fact table.
-    Returns: aircraft_id, month_code, reporteur_id, logbook_entries
-    """
+    """Prepare logbook fact table."""
     return logbookDB.rename(columns={
         "aircraftregistration": "aircraft_id",
         "month": "month_code",
@@ -385,31 +284,19 @@ def prepare_fact_logbook(logbookDB: pd.DataFrame) -> pd.DataFrame:
 
 
 # ==============================================================================
-# PHASE 10: Pipeline Functions
+# PHASE 5: Main Pipeline Functions
 # ==============================================================================
 
 def transform_flights(flights_source: SQLSource, aircraft_df: pd.DataFrame):
     """
     Complete transformation pipeline for flight data.
-    BR1, aircraft enrichment, date, month, FH, and TDM are computed during pre-processing (lazy evaluation).
     Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month)
     """
-    # Create aircraft lookup dictionary for O(1) lookups during pre-processing
-    aircraft_lookup = {
-        row["aircraft_reg_code"]: {
-            "model": row["aircraft_model"],
-            "manufacturer": row["aircraft_manufacturer"]
-        }
-        for _, row in aircraft_df.iterrows()
-    }
-    
-    df = stage_flights(flights_source, aircraft_lookup)
-    # Note: BR1 and aircraft enrichment already applied in pre_process_flights
+    df = stage_flights(flights_source)
     df = enhance_BR2(df)
-    # Note: date, month, FH, TDM already computed in pre_process_flights
     
-    fact_daily = prepare_fact_flight_daily(aggregate_by_time(df, "date"))
-    monthly_agg = aggregate_by_time(df, "month")
+    fact_daily = prepare_fact_flight_daily(aggregate_by_aircraft_and_time(df, "date"))
+    monthly_agg = aggregate_by_aircraft_and_time(df, "month")
     dim_date = prepare_dim_date(df["date"].dropna().tolist())
     dim_month = prepare_dim_month(df["month"].dropna().tolist())
     
@@ -419,33 +306,22 @@ def transform_flights(flights_source: SQLSource, aircraft_df: pd.DataFrame):
 def transform_maintenance(maintenance_source: SQLSource):
     """
     Complete transformation pipeline for maintenance data.
-    Month, total_delay_duration, ADOSS, and ADOSU are computed during pre-processing (lazy evaluation).
-    Aggregation by aircraft+month is done in staging.
     Returns: maintenance_monthly (with ADOSS and ADOSU aggregated by aircraft+month)
     """
-    # All processing and aggregation already done in stage_maintenance
     return stage_maintenance(maintenance_source)
 
 
 def transform_logbook(logbook_source: SQLSource, aircraft_df: pd.DataFrame, personnel_csv_data: CSVSource):
     """
     Complete transformation pipeline for logbook data.
-    BR3, personnel enrichment, and month are computed during pre-processing (lazy evaluation).
     Returns: (fact_logbook, dim_reporteur)
     """
     personnel_df = pd.DataFrame(list(personnel_csv_data))
     personnel_df['reporteurid'] = personnel_df['reporteurid'].astype(int)
     
-    # Create personnel lookup dictionary for O(1) lookups during pre-processing
-    personnel_lookup = {
-        row["reporteurid"]: row["airport"]
-        for _, row in personnel_df.iterrows()
-    }
-    
-    # Pass valid aircraft codes and personnel lookup to staging for BR3 validation and enrichment during pre-processing
+    # Pass valid aircraft codes for BR3 validation
     valid_aircraft_codes = set(aircraft_df["aircraft_reg_code"].tolist())
-    logbook_df = stage_post_flight_reports(logbook_source, valid_aircraft_codes, personnel_lookup)
-    # Note: BR3 and personnel enrichment already applied in pre_process_post_flight_reports
+    logbook_df = stage_post_flight_reports(logbook_source, valid_aircraft_codes)
     
     fact_logbook = prepare_fact_logbook(logbook_df)
     dim_reporteur = prepare_dim_reporteur(logbook_df, personnel_df)
@@ -460,7 +336,6 @@ def transform_logbook(logbook_source: SQLSource, aircraft_df: pd.DataFrame, pers
 if __name__ == "__main__":
     import extract
     
-    
     print("\n" + "=" * 80)
     print("TESTING TRANSFORMATION PIPELINES")
     print("=" * 80 + "\n")
@@ -468,7 +343,7 @@ if __name__ == "__main__":
     # Clear the log file at the start of the ETL pipeline
     clear_log_file()
     
-    aircrafts_df = stage_data(extract.aircraft_manufacturer_info())
+    aircrafts_df = pd.DataFrame(list(extract.aircraft_manufacturer_info()))
 
     # Test flight transformation
     print("Testing flight transformation...")
