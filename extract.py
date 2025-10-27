@@ -36,55 +36,51 @@ except Exception as e:
     )
 
 
-# TODO: Implement here all the extracting functions
-
 
 # AIMS
 def flights_info() -> SQLSource:
-    """Per calcular FH, TO, DY, CN, TDM"""
+    """Extract flight data - only projection and filtering"""
 
     return SQLSource(
         connection=conn,
         query="""
-        SELECT aircraftregistration, actualdeparture, actualarrival, scheduleddeparture, delaycode, cancelled
+        SELECT aircraftregistration,
+               actualdeparture,
+               actualarrival,
+               scheduleddeparture,
+               delaycode,
+               cancelled
         FROM "AIMS".flights
-        ORDER BY aircraftregistration, actualdeparture
         """,
     )
 
 
 def maintenance_info() -> SQLSource:
-    """Extract maintenance data to calculate ADOSS, ADOSU"""
+    """Extract maintenance data - only projection and filtering"""
 
     return SQLSource(
         connection=conn,
         query="""
         SELECT aircraftregistration, 
-               TO_CHAR(scheduleddeparture, 'YYYY-MM') as month, 
-               programmed, 
-               SUM(scheduledarrival - scheduleddeparture) as total_delay_duration  
+               scheduleddeparture, 
+               scheduledarrival,
+               programmed
         FROM "AIMS".maintenance
-        GROUP BY aircraftregistration, TO_CHAR(scheduleddeparture, 'YYYY-MM'), programmed
-        ORDER BY aircraftregistration, month
         """,
     )
 
 
 # AMOS
-
 def post_flight_reports() -> SQLSource:
-    """Per calcular RRh, RRc (report rates)"""
+    """Extract post flight reports - only projection and filtering"""
     return SQLSource(
         connection=conn,
         query="""
         SELECT aircraftregistration, 
                reporteurclass, 
                reporteurid, 
-               TO_CHAR(reportingdate, 'YYYY-MM') as month, 
-               Count(*) as logbook_entries
+               reportingdate
         FROM "AMOS".postflightreports
-        GROUP BY aircraftregistration, reporteurid, reporteurclass, TO_CHAR(reportingdate, 'YYYY-MM')
-        ORDER BY aircraftregistration, reporteurid, month
         """,
     )
 

@@ -2,7 +2,7 @@ from typing import Literal
 from tqdm import tqdm
 import logging
 import pandas as pd
-from pygrametl.datasources import CSVSource , SQLSource
+from pygrametl.datasources import CSVSource , SQLSource, UnionSource
 
 # Configure logging
 LOG_FILE = "cleaning.log"
@@ -30,15 +30,84 @@ def build_monthCode(date) -> str:
 
 
 # ==============================================================================
-# PHASE 1: Data Staging
+# PHASE 1: Data Pre-Processing and Staging
 # ==============================================================================
 
-def stage_data(data_source: CSVSource | SQLSource) -> pd.DataFrame:
+def stage_data(data_source: UnionSource) -> pd.DataFrame:
     """Stage data into a DataFrame"""
+    return pd.DataFrame(list(data_source))
     rows = []
     for row in tqdm(data_source, desc="Staging data into pandas dataframe"):
         rows.append(row)
     return pd.DataFrame.from_dict(rows)
+
+
+def stage_flights(flights_source: SQLSource) -> pd.DataFrame:
+    """
+    Stage and prepare flight data with sorting.
+    Materializes data into memory only when sorting is required.
+    """
+    flights_df = pd.DataFrame(list(flights_source))
+    return flights_df.sort_values(by=["aircraftregistration", "actualdeparture"])
+
+
+def pre_process_maintenance(maintenance_source: SQLSource):
+    """
+    Generator that lazily processes maintenance data row by row without storing in memory.
+    Computes month and total_delay_duration on-the-fly for each row.
+    Yields one row at a time - memory efficient for large datasets.
+    """
+    for row in tqdm(maintenance_source, desc="Pre-processing maintenance data"):
+        row["month"] = build_monthCode(row["scheduleddeparture"])
+        row["total_delay_duration"] = row["scheduledarrival"] - row["scheduleddeparture"]
+        yield row
+
+
+def stage_maintenance(maintenance_source: SQLSource) -> pd.DataFrame:
+    """
+    Stage and prepare maintenance data with aggregation and sorting.
+    Uses lazy generator for preprocessing to avoid intermediate memory storage.
+    Materializes to DataFrame only when aggregation is required.
+    """
+    # Lazy processing through generator - no intermediate storage
+    maintenance_df = pd.DataFrame(list(pre_process_maintenance(maintenance_source)))
+    
+    # Group by aircraft, month, and programmed flag
+    aggregated = maintenance_df.groupby(
+        ["aircraftregistration", "month", "programmed"]
+    ).agg(
+        total_delay_duration=("total_delay_duration", "sum")
+    ).reset_index()
+    
+    return aggregated.sort_values(by=["aircraftregistration", "month"])
+
+
+def pre_process_post_flight_reports(reports_source: SQLSource):
+    """
+    Generator that lazily processes post flight reports row by row without storing in memory.
+    Computes month on-the-fly for each row.
+    Yields one row at a time - memory efficient for large datasets.
+    """
+    for row in tqdm(reports_source, desc="Pre-processing post-flight reports"):
+        row["month"] = build_monthCode(row["reportingdate"])
+        yield row
+
+
+def stage_post_flight_reports(reports_source: SQLSource) -> pd.DataFrame:
+    """
+    Stage and prepare post flight reports with aggregation and sorting.
+    Uses lazy generator for preprocessing to avoid intermediate memory storage.
+    Materializes to DataFrame only when aggregation is required.
+    """
+    # Lazy processing through generator - no intermediate storage
+    reports_df = pd.DataFrame(list(pre_process_post_flight_reports(reports_source)))
+    
+    # Group by aircraft, reporteur, and month to count entries
+    aggregated = reports_df.groupby(
+        ["aircraftregistration", "reporteurid", "reporteurclass", "month"]
+    ).size().reset_index(name="logbook_entries")
+    
+    return aggregated.sort_values(by=["aircraftregistration", "reporteurid", "month"])
 
 
 # ==============================================================================
@@ -371,7 +440,7 @@ def transform_flights(flights_source: SQLSource, aircraft_df: pd.DataFrame):
     Complete transformation pipeline for flight data.
     Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month)
     """
-    df = stage_data(flights_source)
+    df = stage_flights(flights_source)
     df = enhance_BR1(df)
     df = enhance_BR2(df)
     df = enrich_aircraft_manufacturer(df, aircraft_df)
@@ -393,7 +462,7 @@ def transform_maintenance(maintenance_source: SQLSource):
     Complete transformation pipeline for maintenance data.
     Returns: maintenance_monthly (with ADOSS and ADOSU aggregated by aircraft+month)
     """
-    df = stage_data(maintenance_source)
+    df = stage_maintenance(maintenance_source)
     df = compute_ADOSS(df)
     df = compute_ADOSU(df)
     
@@ -411,7 +480,7 @@ def transform_logbook(logbook_source: SQLSource, aircraft_df: pd.DataFrame, pers
     """
     personnel_df = pd.DataFrame(list(personnel_csv_data))
     
-    logbook_df = stage_data(logbook_source)
+    logbook_df = stage_post_flight_reports(logbook_source)
     logbook_df = enhance_BR3(logbook_df, set(aircraft_df["aircraft_reg_code"].tolist()))
     logbook_df = enrich_maintenance_personnel(logbook_df, personnel_df)
     
