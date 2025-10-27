@@ -124,7 +124,7 @@ if __name__ == "__main__":
     fact_monthly = transform.prepare_fact_flight_monthly(monthly_agg, maintenance_monthly)
     
     fact_logbook, dim_reporteur = transform.transform_logbook(
-        extract.logbook_info(),
+        extract.post_flight_reports(),
         extract.aircraft_manufacturer_info(),
         extract.maintenance_personnel_info()
     )

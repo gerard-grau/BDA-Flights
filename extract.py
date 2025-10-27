@@ -43,8 +43,6 @@ except Exception as e:
 def flights_info() -> SQLSource:
     """Per calcular FH, TO, DY, CN, TDM"""
 
-    # TODO: hauries de canviar-li el nom (encara NO és daily)
-
     return SQLSource(
         connection=conn,
         query="""
@@ -73,21 +71,6 @@ def maintenance_info() -> SQLSource:
 
 
 # AMOS
-def logbook_info() -> SQLSource:
-    """Per calcular RRh, RRc (report rates)"""
-    return SQLSource(
-        connection=conn,
-        query="""
-        SELECT aircraftregistration, 
-               reporteurclass, 
-               reporteurid, 
-               TO_CHAR(reportingdate, 'YYYY-MM') as month, 
-               Count(*) as logbook_entries
-        FROM "AMOS".technicallogbookorders
-        GROUP BY aircraftregistration, reporteurid, reporteurclass, TO_CHAR(reportingdate, 'YYYY-MM')
-        ORDER BY aircraftregistration, reporteurid, month
-        """,
-    )
 
 def post_flight_reports() -> SQLSource:
     """Per calcular RRh, RRc (report rates)"""
@@ -120,7 +103,7 @@ if __name__ == "__main__":
 
     res1 = flights_info()
     res2 = maintenance_info()
-    res3 = logbook_info()
+    res3 = post_flight_reports()
 
     for i, row in enumerate(res1):
         print(row)
@@ -130,6 +113,8 @@ if __name__ == "__main__":
 
 # ====================================================================================================================================
 # Baseline queries
+# ====================================================================================================================================
+
 def get_aircrafts_per_manufacturer() -> dict[str, list[str]]:
     """Function to generate a dictionary with one entry per manufacturer and a list of aircraft registration codes as values."""
 

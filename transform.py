@@ -1,7 +1,8 @@
+from typing import Literal
 from tqdm import tqdm
 import logging
 import pandas as pd
-from pygrametl.datasources import CSVSource
+from pygrametl.datasources import CSVSource , SQLSource
 
 # Configure logging
 LOG_FILE = "cleaning.log"
@@ -32,10 +33,10 @@ def build_monthCode(date) -> str:
 # PHASE 1: Data Staging
 # ==============================================================================
 
-def stage_data(data) -> pd.DataFrame:
+def stage_data(data_source: CSVSource | SQLSource) -> pd.DataFrame:
     """Stage data into a DataFrame"""
     rows = []
-    for row in tqdm(data, desc="Staging data into pandas dataframe"):
+    for row in tqdm(data_source, desc="Staging data into pandas dataframe"):
         rows.append(row)
     return pd.DataFrame.from_dict(rows)
 
@@ -78,7 +79,7 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
     return stagingDB.drop(deletedIndexes)
 
 
-def enhance_BR3(postflightreportsDB, valid_aircraft_codes: set[str]) -> pd.DataFrame:
+def enhance_BR3(postflightreportsDB: pd.DataFrame, valid_aircraft_codes: set[str]) -> pd.DataFrame:
     """
     Apply Business Rule 3: 
     The aircraft registration in a post flight report must be an aircraft.
@@ -97,7 +98,7 @@ def enhance_BR3(postflightreportsDB, valid_aircraft_codes: set[str]) -> pd.DataF
 # PHASE 3: Date/Time Transformations
 # ==============================================================================
 
-def split_date(stagingDB) -> pd.DataFrame:
+def split_date(stagingDB: pd.DataFrame) -> pd.DataFrame:
     """Add date column in format YYYY-MM-DD"""
     stagingDB["date"] = stagingDB.apply(
         lambda row: build_dateCode(row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]),
@@ -106,7 +107,7 @@ def split_date(stagingDB) -> pd.DataFrame:
     return stagingDB
 
 
-def split_month(stagingDB) -> pd.DataFrame:
+def split_month(stagingDB: pd.DataFrame) -> pd.DataFrame:
     """Add month column in format YYYY-MM"""
     stagingDB["month"] = stagingDB.apply(
         lambda row: build_monthCode(row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]),
@@ -119,7 +120,7 @@ def split_month(stagingDB) -> pd.DataFrame:
 # PHASE 4: Metric Calculations
 # ==============================================================================
 
-def compute_FH(stagingDB) -> pd.DataFrame:
+def compute_FH(stagingDB: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate Flight Hours (FH) in HOURS.
     FH = actualArrival - actualDeparture (for non-cancelled flights)
@@ -131,7 +132,7 @@ def compute_FH(stagingDB) -> pd.DataFrame:
     return stagingDB
 
 
-def compute_TDM(stagingDB) -> pd.DataFrame:
+def compute_TDM(stagingDB: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate Total Delay Minutes (TDM) in MINUTES.
     TDM = actualDeparture - scheduledDeparture (for delayed flights)
@@ -147,7 +148,7 @@ def compute_TDM(stagingDB) -> pd.DataFrame:
 # PHASE 5: Aggregation Functions
 # ==============================================================================
 
-def aggregate_by_time(stagingDB, granularity) -> pd.DataFrame:
+def aggregate_by_time(stagingDB: pd.DataFrame, granularity: Literal['date', 'month']) -> pd.DataFrame:
     """
     Aggregate flight data by day or month.
     Returns: aircraftregistration, date/month, FH, TO (TakeOffs), CN (Cancellations), DY (Delays), TDM
@@ -165,7 +166,7 @@ def aggregate_by_time(stagingDB, granularity) -> pd.DataFrame:
 # PHASE 6: Maintenance Data Transformations
 # ==============================================================================
 
-def compute_ADOSS(maintenanceDB) -> pd.DataFrame:
+def compute_ADOSS(maintenanceDB: pd.DataFrame) -> pd.DataFrame:
     """
     Compute ADOSS (Aircraft Days Out of Service - Scheduled) from maintenanceDB.
     ADOSS = scheduled maintenance duration in days
@@ -177,7 +178,7 @@ def compute_ADOSS(maintenanceDB) -> pd.DataFrame:
     return maintenanceDB
 
 
-def compute_ADOSU(maintenanceDB) -> pd.DataFrame:
+def compute_ADOSU(maintenanceDB: pd.DataFrame) -> pd.DataFrame:
     """
     Compute ADOSU (Aircraft Days Out of Service - Unscheduled) from maintenanceDB.
     ADOSU = unscheduled maintenance duration in days
@@ -189,7 +190,7 @@ def compute_ADOSU(maintenanceDB) -> pd.DataFrame:
     return maintenanceDB
 
 
-def merge_ADOS(flightDB, maintenanceDB) -> pd.DataFrame:
+def merge_ADOS(flightDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFrame:
     """
     Merge ADOSS and ADOSU from maintenanceDB into flight aggregated data.
     Fill missing values with 0 (aircraft with no maintenance in that month)
@@ -206,12 +207,11 @@ def merge_ADOS(flightDB, maintenanceDB) -> pd.DataFrame:
 # PHASE 7: Data Enrichment (Lookups)
 # ==============================================================================
 
-def enrich_aircraft_manufacturer(dataDB, aircraft_csv_data: CSVSource) -> pd.DataFrame:
+def enrich_aircraft_manufacturer(dataDB: pd.DataFrame, aircraft_df: pd.DataFrame) -> pd.DataFrame:
     """
     Enrich data with aircraft manufacturer information.
     Adds: model, manufacturer columns
     """
-    aircraft_df = pd.DataFrame(list(aircraft_csv_data)) if not isinstance(aircraft_csv_data, pd.DataFrame) else aircraft_csv_data
     
     return pd.merge(
         dataDB,
@@ -225,7 +225,7 @@ def enrich_aircraft_manufacturer(dataDB, aircraft_csv_data: CSVSource) -> pd.Dat
     }).drop(columns=["aircraft_reg_code"])
 
 
-def enrich_maintenance_personnel(logbookDB, personnel_df: pd.DataFrame) -> pd.DataFrame:
+def enrich_maintenance_personnel(logbookDB: pd.DataFrame, personnel_df: pd.DataFrame) -> pd.DataFrame:
     """
     Enrich logbook data with maintenance personnel airport information.
     If reporteurid is in personnel CSV -> it's maintenance (MAREP), add airport
@@ -249,12 +249,11 @@ def enrich_maintenance_personnel(logbookDB, personnel_df: pd.DataFrame) -> pd.Da
 # PHASE 8: Dimension Table Preparation
 # ==============================================================================
 
-def prepare_dim_aircraft(aircraft_csv_data) -> pd.DataFrame:
+def prepare_dim_aircraft(aircraft_df: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare aircraft dimension table.
     Returns: aircraft_id, model, manufacturer
     """
-    aircraft_df = pd.DataFrame(list(aircraft_csv_data))
     
     return aircraft_df[["aircraft_reg_code", "aircraft_model", "aircraft_manufacturer"]].rename(columns={
         "aircraft_reg_code": "aircraft_id",
@@ -263,7 +262,7 @@ def prepare_dim_aircraft(aircraft_csv_data) -> pd.DataFrame:
     })
 
 
-def prepare_dim_reporteur(logbookDB, personnel_df) -> pd.DataFrame:
+def prepare_dim_reporteur(logbookDB: pd.DataFrame, personnel_df: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare reporteur dimension table.
     Returns: reporteur_id, type (PIREP/MAREP), airport_code
@@ -297,7 +296,7 @@ def prepare_dim_date(dates_list: list) -> pd.DataFrame:
     return dim_date
 
 
-def prepare_dim_month(dates_list) -> pd.DataFrame:
+def prepare_dim_month(dates_list: list) -> pd.DataFrame:
     """
     Prepare month dimension table.
     Returns: month_code, year
@@ -314,7 +313,7 @@ def prepare_dim_month(dates_list) -> pd.DataFrame:
 # PHASE 9: Fact Table Preparation
 # ==============================================================================
 
-def prepare_fact_flight_daily(aggregatedDB) -> pd.DataFrame:
+def prepare_fact_flight_daily(aggregatedDB: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare daily flight fact table.
     Returns: aircraft_id, date_code, flight_hours, flight_cycles
@@ -327,7 +326,7 @@ def prepare_fact_flight_daily(aggregatedDB) -> pd.DataFrame:
     })[["aircraft_id", "date_code", "flight_hours", "flight_cycles"]]
 
 
-def prepare_fact_flight_monthly(aggregatedDB, maintenanceDB) -> pd.DataFrame:
+def prepare_fact_flight_monthly(aggregatedDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare monthly flight fact table with maintenance data merged.
     Returns: aircraft_id, month_code, flight_hours, flight_cycles, 
@@ -351,7 +350,7 @@ def prepare_fact_flight_monthly(aggregatedDB, maintenanceDB) -> pd.DataFrame:
     ]]
 
 
-def prepare_fact_logbook(logbookDB) -> pd.DataFrame:
+def prepare_fact_logbook(logbookDB: pd.DataFrame) -> pd.DataFrame:
     """
     Prepare logbook fact table.
     Returns: aircraft_id, month_code, reporteur_id, logbook_entries
@@ -367,7 +366,7 @@ def prepare_fact_logbook(logbookDB) -> pd.DataFrame:
 # PHASE 10: Pipeline Functions
 # ==============================================================================
 
-def transform_flights(flights_source, aircraft_csv_data):
+def transform_flights(flights_source: SQLSource, aircraft_df: pd.DataFrame):
     """
     Complete transformation pipeline for flight data.
     Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month)
@@ -375,7 +374,7 @@ def transform_flights(flights_source, aircraft_csv_data):
     df = stage_data(flights_source)
     df = enhance_BR1(df)
     df = enhance_BR2(df)
-    df = enrich_aircraft_manufacturer(df, aircraft_csv_data)
+    df = enrich_aircraft_manufacturer(df, aircraft_df)
     df = split_date(df)
     df = split_month(df)
     df = compute_FH(df)
@@ -389,7 +388,7 @@ def transform_flights(flights_source, aircraft_csv_data):
     return fact_daily, monthly_agg, dim_date, dim_month
 
 
-def transform_maintenance(maintenance_source):
+def transform_maintenance(maintenance_source: SQLSource):
     """
     Complete transformation pipeline for maintenance data.
     Returns: maintenance_monthly (with ADOSS and ADOSU aggregated by aircraft+month)
@@ -405,13 +404,12 @@ def transform_maintenance(maintenance_source):
     ).reset_index()
 
 
-def transform_logbook(logbook_source, aircraft_csv_data, personnel_csv_data):
+def transform_logbook(logbook_source: SQLSource, aircraft_df: pd.DataFrame, personnel_csv_data: CSVSource):
     """
     Complete transformation pipeline for logbook data.
     Returns: (fact_logbook, dim_reporteur)
     """
     personnel_df = pd.DataFrame(list(personnel_csv_data))
-    aircraft_df = pd.DataFrame(list(aircraft_csv_data))
     
     logbook_df = stage_data(logbook_source)
     logbook_df = enhance_BR3(logbook_df, set(aircraft_df["aircraft_reg_code"].tolist()))
@@ -421,10 +419,6 @@ def transform_logbook(logbook_source, aircraft_csv_data, personnel_csv_data):
     dim_reporteur = prepare_dim_reporteur(logbook_df, personnel_df)
     
     return fact_logbook, dim_reporteur
-
-
-def extract_all():
-    ...
 
 
 # ==============================================================================
@@ -441,12 +435,14 @@ if __name__ == "__main__":
     
     # Clear the log file at the start of the ETL pipeline
     clear_log_file()
+    
+    aircrafts_df = stage_data(extract.aircraft_manufacturer_info())
 
     # Test flight transformation
     print("Testing flight transformation...")
     fact_daily, monthly_agg, dim_date, dim_month = transform_flights(
         extract.flights_info(),
-        extract.aircraft_manufacturer_info()
+        aircrafts_df
     )
     print(f"Fact Daily shape: {fact_daily.shape}")
     print(fact_daily.head())
@@ -471,8 +467,8 @@ if __name__ == "__main__":
     print("\n" + "-" * 80)
     print("Testing logbook transformation...")
     fact_logbook, dim_reporteur = transform_logbook(
-        extract.logbook_info(),
-        extract.aircraft_manufacturer_info(),
+        extract.post_flight_reports(),
+        aircrafts_df,
         extract.maintenance_personnel_info()
     )
     print(f"Fact Logbook shape: {fact_logbook.shape}")
@@ -483,7 +479,7 @@ if __name__ == "__main__":
     # Test dimensions
     print("\n" + "-" * 80)
     print("Testing dimensions...")
-    dim_aircraft = prepare_dim_aircraft(extract.aircraft_manufacturer_info())
+    dim_aircraft = prepare_dim_aircraft(aircrafts_df)
     print(f"Dim Aircraft shape: {dim_aircraft.shape}")
     print(dim_aircraft.head())
     
