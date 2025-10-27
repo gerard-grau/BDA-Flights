@@ -42,9 +42,10 @@ def pre_process_flights(flights_source: SQLSource):
             pass
 
         # Date/Time transformations
-        reference_date = row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]
-        row["date"] = build_dateCode(reference_date)
-        row["month"] = build_monthCode(reference_date)
+        # Use scheduleddeparture for date/month/year grouping to match baseline queries
+        # Baseline uses: DATE_PART('year', f.scheduleddeparture)
+        row["date"] = build_dateCode(row["scheduleddeparture"])
+        row["month"] = build_monthCode(row["scheduleddeparture"])
         
         # Metric calculations
         if not row["cancelled"]:

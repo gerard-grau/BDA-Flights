@@ -156,24 +156,24 @@ class DW:
             SELECT
                 da.manufacturer,
                 CAST(dm.year AS VARCHAR) AS year,
-                ROUND(SUM(ffm.flight_hours) / COUNT(DISTINCT ffm.aircraft_id), 2) AS FH,
-                ROUND(SUM(ffm.flight_cycles) / COUNT(DISTINCT ffm.aircraft_id), 2) AS TakeOff,
-                ROUND(SUM(ffm.adoss) / COUNT(DISTINCT ffm.aircraft_id), 2) AS ADOSS,
-                ROUND(SUM(ffm.adosu) / COUNT(DISTINCT ffm.aircraft_id), 2) AS ADOSU,
-                ROUND((SUM(ffm.adoss) + SUM(ffm.adosu)) / COUNT(DISTINCT ffm.aircraft_id), 2) AS ADOS,
-                365 - ROUND((SUM(ffm.adoss) + SUM(ffm.adosu)) / COUNT(DISTINCT ffm.aircraft_id), 2) AS ADIS,
-                ROUND(
+                CAST(ROUND(SUM(ffm.flight_hours) / COUNT(DISTINCT ffm.aircraft_id), 2) AS DECIMAL(10,2)) AS FH,
+                CAST(ROUND(SUM(ffm.flight_cycles) / COUNT(DISTINCT ffm.aircraft_id), 2) AS DECIMAL(10,2)) AS TakeOff,
+                CAST(ROUND(SUM(ffm.adoss) / COUNT(DISTINCT ffm.aircraft_id), 2) AS DECIMAL(10,2)) AS ADOSS,
+                CAST(ROUND(SUM(ffm.adosu) / COUNT(DISTINCT ffm.aircraft_id), 2) AS DECIMAL(10,2)) AS ADOSU,
+                CAST(ROUND((SUM(ffm.adoss) + SUM(ffm.adosu)) / COUNT(DISTINCT ffm.aircraft_id), 2) AS DECIMAL(10,2)) AS ADOS,
+                CAST(365 - ROUND((SUM(ffm.adoss) + SUM(ffm.adosu)) / COUNT(DISTINCT ffm.aircraft_id), 2) AS DECIMAL(10,2)) AS ADIS,
+                CAST(ROUND(
                     ROUND(SUM(ffm.flight_hours) / COUNT(DISTINCT ffm.aircraft_id), 2) /
                     ((365 - ROUND((SUM(ffm.adoss) + SUM(ffm.adosu)) / COUNT(DISTINCT ffm.aircraft_id), 2)) * 24),
-                2) AS DU,
-                ROUND(
+                2) AS DECIMAL(10,2)) AS DU,
+                CAST(ROUND(
                     ROUND(SUM(ffm.flight_cycles) / COUNT(DISTINCT ffm.aircraft_id), 2) /
                     (365 - ROUND((SUM(ffm.adoss) + SUM(ffm.adosu)) / COUNT(DISTINCT ffm.aircraft_id), 2)),
-                2) AS DC,
-                100 * ROUND(SUM(ffm.delays) / ROUND(SUM(ffm.flight_cycles), 2), 4) AS DYR,
-                100 * ROUND(SUM(ffm.cancellations) / ROUND(SUM(ffm.flight_cycles), 2), 4) AS CNR,
-                100 - ROUND(100 * (SUM(ffm.delays) + SUM(ffm.cancellations)) / SUM(ffm.flight_cycles), 2) AS TDR,
-                100 * ROUND(SUM(ffm.total_delay_minutes) / SUM(ffm.delays), 2) AS ADD
+                2) AS DECIMAL(10,2)) AS DC,
+                CAST(100 * ROUND(SUM(ffm.delays) / ROUND(SUM(ffm.flight_cycles), 2), 4) AS DECIMAL(10,4)) AS DYR,
+                CAST(100 * ROUND(SUM(ffm.cancellations) / ROUND(SUM(ffm.flight_cycles), 2), 4) AS DECIMAL(10,4)) AS CNR,
+                CAST(100 - ROUND(100 * (SUM(ffm.delays) + SUM(ffm.cancellations)) / SUM(ffm.flight_cycles), 2) AS DECIMAL(10,2)) AS TDR,
+                CAST(100 * ROUND(SUM(ffm.total_delay_minutes) / SUM(ffm.delays), 2) AS DECIMAL(10,2)) AS ADD
             FROM fact_flight_monthly ffm
             JOIN dim_aircraft da ON ffm.aircraft_id = da.aircraft_id
             JOIN dim_month dm ON ffm.month_code = dm.month_code
@@ -209,8 +209,8 @@ class DW:
             SELECT
                 mr.manufacturer,
                 mr.year,
-                1000 * ROUND(mr.total_reports / mu.total_flight_hours, 3) AS RRh,
-                100 * ROUND(mr.total_reports / mu.total_flight_cycles, 2) AS RRc
+                CAST(1000 * ROUND(mr.total_reports / mu.total_flight_hours, 3) AS DECIMAL(10,3)) AS RRh,
+                CAST(100 * ROUND(mr.total_reports / mu.total_flight_cycles, 2) AS DECIMAL(10,2)) AS RRc
             FROM monthly_reports mr
             JOIN monthly_utilization mu ON mr.manufacturer = mu.manufacturer AND mr.year = mu.year
             ORDER BY mr.manufacturer, mr.year;
@@ -247,8 +247,8 @@ class DW:
                 mr.manufacturer,
                 mr.year,
                 mr.role,
-                1000 * ROUND(mr.total_reports / mu.total_flight_hours, 3) AS RRh,
-                100 * ROUND(mr.total_reports / mu.total_flight_cycles, 2) AS RRc
+                CAST(1000 * ROUND(mr.total_reports / mu.total_flight_hours, 3) AS DECIMAL(10,3)) AS RRh,
+                CAST(100 * ROUND(mr.total_reports / mu.total_flight_cycles, 2) AS DECIMAL(10,2)) AS RRc
             FROM monthly_reports_per_role mr
             JOIN monthly_utilization mu ON mr.manufacturer = mu.manufacturer AND mr.year = mu.year
             ORDER BY mr.manufacturer, mr.year, mr.role;
