@@ -123,11 +123,18 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
     Applies BR3 (validates aircraft), computes month.
     """
     for row in tqdm(reports_source, desc="Pre-processing post-flight reports"):
+        
         # Business Rule 3: aircraft registration must be valid
         if row["aircraftregistration"] not in valid_aircraft_codes:
             logging.info(f"BR3 violation - Invalid aircraft registration in logbook: "
                        f"Aircraft {row['aircraftregistration']}, Reporteur {row['reporteurid']}")
-            continue  # Skip this row
+            continue
+        
+        # Ignore reports from before 2023, since there are no recorded flights.
+        # Otherwise we would get a Foreign Key violation. Even if we tried to fix it, there is no point
+        # since the metrics to be computed (RRh, RRc...) need flight data (FH or TO).
+        if row["reportingdate"].year < 2023 or row["reportingdate"].year > 2024:
+            continue
         
         # Date/Time transformation
         row["month"] = build_monthCode(row["reportingdate"])

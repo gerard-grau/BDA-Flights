@@ -7,7 +7,7 @@ def time_and_print(function):
     start = time.perf_counter()
     result = function()
     end = time.perf_counter()
-    # print(result)
+    print(result)
     print(f"Execution time: {end - start:.4f} seconds")
 
 
