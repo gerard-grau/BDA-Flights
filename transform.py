@@ -38,8 +38,9 @@ def pre_process_flights(flights_source: SQLSource):
         # Business Rule 1 (BR-23): actualArrival must be posterior to actualDeparture
         if not row["cancelled"] and row["actualdeparture"] > row["actualarrival"]:
             # Swap their values
-            row["actualdeparture"], row["actualarrival"] = row["actualarrival"], row["actualdeparture"]
-        
+            # row["actualdeparture"], row["actualarrival"] = row["actualarrival"], row["actualdeparture"]
+            pass
+
         # Date/Time transformations
         reference_date = row["actualdeparture"] if not row["cancelled"] else row["scheduleddeparture"]
         row["date"] = build_dateCode(reference_date)
@@ -51,9 +52,16 @@ def pre_process_flights(flights_source: SQLSource):
         else:
             row["FH"] = 0
         
-        is_delayed = pd.notna(row.get("delaycode"))
+        # Check if flight is delayed (arrival > 15 minutes late from scheduled arrival)
+        if not row["cancelled"]:
+            delay_minutes = (row["actualarrival"] - row.get("scheduledarrival")).total_seconds() / 60
+            is_delayed = delay_minutes > 15
+        else:
+            is_delayed = False
+            delay_minutes = 0
+        
         if is_delayed:
-            row["TDM"] = (row["actualdeparture"] - row["scheduleddeparture"]).total_seconds() / 60
+            row["TDM"] = (row["actualarrival"] - row["scheduledarrival"]).total_seconds() / 60
         else:
             row["TDM"] = 0
         
@@ -63,6 +71,7 @@ def pre_process_flights(flights_source: SQLSource):
         
         # Drop unused columns to save memory
         row.pop("scheduleddeparture")
+        row.pop("scheduledarrival")
         row.pop("delaycode")
         
         yield row
@@ -83,16 +92,17 @@ def pre_process_maintenance(maintenance_source: SQLSource):
         # Date/Time transformation
         row["month"] = build_monthCode(row["scheduleddeparture"])
         
-        # Calculate total delay duration
+        # Calculate total delay duration in days
         total_delay_duration = row["scheduledarrival"] - row["scheduleddeparture"]
+        total_duration_days = total_delay_duration.total_seconds() / 86400
         
         # Metric calculations - ADOSS and ADOSU
         if row["programmed"]:
-            row["ADOSS"] = round((total_delay_duration.days + total_delay_duration.seconds / 86400), 2)
+            row["ADOSS"] = total_duration_days
             row["ADOSU"] = 0.0
         else:
             row["ADOSS"] = 0.0
-            row["ADOSU"] = round((total_delay_duration.days + total_delay_duration.seconds / 86400), 2)
+            row["ADOSU"] = total_duration_days
         
         # Drop unused columns to save memory
         row.pop("scheduleddeparture")
@@ -166,6 +176,7 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
     Apply Business Rule 2 (BR-21): Two non-cancelled flights of the same aircraft cannot overlap.
     Fix: Remove the earlier overlapping flight and log it.
     """
+    return stagingDB
     deletedIndexes = []
     prev_row = None
     
@@ -257,13 +268,13 @@ def prepare_fact_flight_daily(aggregatedDB: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_fact_flight_monthly(aggregatedDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFrame:
     """Prepare monthly flight fact table with maintenance data merged."""
-    # Merge ADOSS and ADOSU from maintenanceDB
+    # Merge ADOSS and ADOSU from maintenanceDB using OUTER join to include maintenance-only months
     fact_monthly = pd.merge(
         aggregatedDB,
         maintenanceDB[["aircraftregistration", "month", "ADOSS", "ADOSU"]],
         on=["aircraftregistration", "month"],
-        how="left"
-    ).rename(columns={
+        how="outer"  # Changed from "left" to "outer" to include months with maintenance but no flights
+    ).fillna(0).rename(columns={  # Fill NaN values with 0
         "aircraftregistration": "aircraft_id",
         "month": "month_code",
         "FH": "flight_hours",

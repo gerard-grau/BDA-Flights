@@ -48,6 +48,7 @@ def flights_info() -> SQLSource:
                actualdeparture,
                actualarrival,
                scheduleddeparture,
+               scheduledarrival,
                delaycode,
                cancelled
         FROM "AIMS".flights
