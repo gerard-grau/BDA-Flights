@@ -26,21 +26,20 @@ def build_monthCode(date) -> str:
 
 
 # ==============================================================================
-# PHASE 1: Data Pre-Processing
+# PHASE 1: Data cleaning and metric pre-computation
 # ==============================================================================
 
 def pre_process_flights(flights_source: SQLSource):
     """
-    Generator that processes flight data row-by-row (memory efficient).
+    Generator that processes flight data row-by-row, without staging (memory efficient).
     Applies BR1, computes date/month/FH/TDM, adds aggregation flags.
     """
     for row in tqdm(flights_source, desc="Pre-processing flight data"):
         # Business Rule 1 (BR-23): actualArrival must be posterior to actualDeparture
         if not row["cancelled"] and row["actualdeparture"] > row["actualarrival"]:
             # Swap their values
-            # row["actualdeparture"], row["actualarrival"] = row["actualarrival"], row["actualdeparture"]
-            pass  # TODO: testing for baseline
-
+            row["actualdeparture"], row["actualarrival"] = row["actualarrival"], row["actualdeparture"]
+            
         # Date/Time transformations
         # Use scheduleddeparture for date/month/year grouping to match baseline queries
         row["date"] = build_dateCode(row["scheduleddeparture"])
@@ -52,7 +51,7 @@ def pre_process_flights(flights_source: SQLSource):
         else:
             row["FH"] = 0
         
-        # Check if flight is delayed (arrival > 15 minutes late from scheduled arrival, and < 360))
+        # Check if flight is delayed (arrival > 15 minutes late from scheduled arrival, and < 6*60))
         if not row["cancelled"]:
             delay_minutes = (row["actualarrival"] - row.get("scheduledarrival")).total_seconds() / 60
             is_delayed = 15 < delay_minutes < 6*60
@@ -65,8 +64,8 @@ def pre_process_flights(flights_source: SQLSource):
             row["TDM"] = 0
         
         # Helper flags for efficient aggregation
-        row["is_takeoff"] = 0 if row["cancelled"] else 1  # For counting takeoffs (TO)
-        row["is_delayed"] = 1 if is_delayed else 0  # For counting delays (DY)
+        row["is_takeoff"] = 0 if row["cancelled"] else 1
+        row["is_delayed"] = 1 if is_delayed else 0
         
         # Drop unused columns to save memory
         row.pop("scheduleddeparture")
@@ -85,7 +84,7 @@ def stage_flights(flights_source: SQLSource) -> pd.DataFrame:
 
 def pre_process_maintenance(maintenance_source: SQLSource):
     """
-    Generator that processes maintenance data row-by-row (memory efficient).
+    Generator that processes maintenance data row-by-row, without staging (memory efficient).
     Computes month, ADOSS, and ADOSU metrics.
     """
     for row in tqdm(maintenance_source, desc="Pre-processing maintenance data"):
@@ -129,7 +128,7 @@ def stage_maintenance(maintenance_source: SQLSource) -> pd.DataFrame:
 
 def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str], limit_dates):
     """
-    Generator that processes post-flight reports row-by-row (memory efficient).
+    Generator that processes post-flight reports row-by-row, without staging (memory efficient).
     Applies BR3 (validates aircraft), computes month.
     """
     for row in tqdm(reports_source, desc="Pre-processing post-flight reports"):
@@ -176,7 +175,7 @@ def stage_aircrafts(aircraft_source: CSVSource) -> pd.DataFrame:
 
 
 # ==============================================================================
-# PHASE 2: Business Rules (Data Quality)
+# Business Rule 2
 # ==============================================================================
 
 def enhance_BR2(stagingDB) -> pd.DataFrame:
@@ -184,7 +183,7 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
     Apply Business Rule 2 (BR-21): Two non-cancelled flights of the same aircraft cannot overlap.
     Fix: Remove the earlier overlapping flight and log it.
     """
-    return stagingDB  # TODO: testing for baseline
+
     deletedIndexes = []
     prev_row = None
     
@@ -322,10 +321,10 @@ def prepare_fact_logbook(logbookDB: pd.DataFrame) -> pd.DataFrame:
 def transform_flights(flights_source: SQLSource):
     """
     Complete transformation pipeline for flight data.
-    Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month, min_date, max_date)
+    Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month, limit_dates)
     
-    The min_date and max_date are the date range of the flight data, used for filtering
-    logbook reports to ensure referential integrity.
+    The limit dates are the min_date and max_date of the date range of the flight data,
+    used for filtering logbook reports to ensure referential integrity.
     """
     df = stage_flights(flights_source)
     df = enhance_BR2(df)
@@ -363,70 +362,3 @@ def transform_logbook(logbook_source: SQLSource, personnel_csv_data: CSVSource, 
     fact_logbook = prepare_fact_logbook(logbook_df)
     dim_reporteur = prepare_dim_reporteur(logbook_df, personnel_df)
     return fact_logbook, dim_reporteur
-
-
-
-# ==============================================================================
-# TESTING
-# ==============================================================================
-
-if __name__ == "__main__":
-    import extract
-    
-    print("\n" + "=" * 80)
-    print("TESTING TRANSFORMATION PIPELINES")
-    print("=" * 80 + "\n")
-    
-    # Clear the log file at the start of the ETL pipeline
-    clear_log_file()
-    
-    aircrafts_df = pd.DataFrame(list(extract.aircraft_manufacturer_info()))
-
-    # Test flight transformation
-    print("Testing flight transformation...")
-    fact_daily, monthly_agg, dim_date, dim_month, limit_dates = transform_flights(extract.flights_info())
-
-    print(f"Fact Daily shape: {fact_daily.shape}")
-    print(fact_daily.head())
-    print(f"\nMonthly Aggregation shape: {monthly_agg.shape}")
-    print(monthly_agg.head())
-    print(f"\nDate range: {limit_dates[0]} to {limit_dates[1]}")
-
-    # Merge to create final monthly fact
-    print("\n" + "-" * 80)
-    print("Creating final monthly fact table...")
-    fact_monthly = prepare_fact_flight_monthly(monthly_agg, extract.maintenance_info())
-    print(f"Fact Monthly shape: {fact_monthly.shape}")
-    print(fact_monthly.head())
-    
-    # Test logbook transformation
-    print("\n" + "-" * 80)
-    print("Testing logbook transformation...")
-    fact_logbook, dim_reporteur = transform_logbook(
-        extract.post_flight_reports(),
-        extract.maintenance_personnel_info(),
-        set(aircrafts_df["aircraft_reg_code"].tolist()),
-        limit_dates
-    )
-    print(f"Fact Logbook shape: {fact_logbook.shape}")
-    print(fact_logbook.head())
-    print(f"\nDim Reporteur shape: {dim_reporteur.shape}")
-    print(dim_reporteur.head())
-    
-    # Test dimensions
-    print("\n" + "-" * 80)
-    print("Testing dimensions...")
-    dim_aircraft = prepare_dim_aircraft(aircrafts_df)
-    print(f"Dim Aircraft shape: {dim_aircraft.shape}")
-    print(dim_aircraft.head())
-    
-    print(f"\nDim Date shape: {dim_date.shape}")
-    print(dim_date.head())
-    
-    print(f"\nDim Month shape: {dim_month.shape}")
-    print(dim_month.head())
-    
-    print("\n" + "=" * 80)
-    print("ALL TRANSFORMATIONS COMPLETED SUCCESSFULLY!")
-    print("=" * 80)
-

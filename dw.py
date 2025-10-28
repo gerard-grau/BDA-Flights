@@ -21,7 +21,10 @@ class DW:
 
         if create:
             try:
-                # ======================================================================================================= Create the tables in the DW
+                # ======================================================================
+                # Create the tables in the DW
+                # ======================================================================
+
                 create_statements = [
                     """
                     CREATE TABLE dim_aircraft (
@@ -99,8 +102,11 @@ class DW:
 
         # Link DuckDB and pygrametl
         self.conn_pygrametl = pygrametl.ConnectionWrapper(self.conn_duckdb)
+        
+        # ======================================================================
+        #  Dimension and fact table objects
+        # ======================================================================
 
-        # ======================================================================================================= Dimension and fact table objects
         # --- Dimension Table Definitions ---
         self.dim_aircraft = CachedDimension(
             name='dim_aircraft',
@@ -150,7 +156,9 @@ class DW:
             measures=('logbook_entries',)
         )
 
-    # Rewrite the queries exemplified in "extract.py"
+    # ======================================================================
+    #  Rewrite query utilization
+    # ======================================================================
     def query_utilization(self):
         result = self.conn_duckdb.execute("""
             SELECT

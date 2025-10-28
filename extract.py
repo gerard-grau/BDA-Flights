@@ -36,8 +36,10 @@ except Exception as e:
     )
 
 
-
+# ==============================================================================
 # AIMS
+# ==============================================================================
+
 def flights_info() -> SQLSource:
     """Extract flight data - only projection and filtering"""
 
@@ -71,7 +73,10 @@ def maintenance_info() -> SQLSource:
     )
 
 
+# ==============================================================================
 # AMOS
+# ==============================================================================
+
 def post_flight_reports() -> SQLSource:
     """Extract post flight reports - only projection and filtering"""
     return SQLSource(
@@ -85,7 +90,11 @@ def post_flight_reports() -> SQLSource:
         """,
     )
 
+
+# ==============================================================================
 # CSV
+# ==============================================================================
+
 def aircraft_manufacturer_info() -> CSVSource:
     return CSVSource(f=open("data/aircraft-manufaturerinfo-lookup.csv"), delimiter=",")
 
@@ -94,23 +103,10 @@ def maintenance_personnel_info() -> CSVSource:
     return CSVSource(f=open("data/maintenance_personnel.csv"), delimiter=",")
 
 
-# Per fer test
 
-if __name__ == "__main__":
-
-    res1 = flights_info()
-    res2 = maintenance_info()
-    res3 = post_flight_reports()
-
-    for i, row in enumerate(res1):
-        print(row)
-        if i == 3:
-            break
-
-
-# ====================================================================================================================================
+# ==============================================================================
 # Baseline queries
-# ====================================================================================================================================
+# ==============================================================================
 
 def get_aircrafts_per_manufacturer() -> dict[str, list[str]]:
     """Function to generate a dictionary with one entry per manufacturer and a list of aircraft registration codes as values."""
