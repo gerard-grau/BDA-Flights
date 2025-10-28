@@ -16,7 +16,6 @@ if __name__ == '__main__':
     aircraft_df = pd.DataFrame(list(extract.aircraft_manufacturer_info()))
     fact_daily, monthly_agg, dim_date, dim_month = transform.transform_flights(
         extract.flights_info(),
-        aircraft_df
     )
     
     maintenance_monthly = transform.transform_maintenance(extract.maintenance_info())
@@ -24,8 +23,8 @@ if __name__ == '__main__':
     
     fact_logbook, dim_reporteur = transform.transform_logbook(
         extract.post_flight_reports(),
-        aircraft_df,
-        extract.maintenance_personnel_info()
+        extract.maintenance_personnel_info(),
+        set(aircraft_df["aircraft_reg_code"].tolist())
     )
     
     dim_aircraft = transform.prepare_dim_aircraft(aircraft_df)

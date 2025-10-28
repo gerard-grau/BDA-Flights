@@ -39,7 +39,7 @@ def pre_process_flights(flights_source: SQLSource):
         if not row["cancelled"] and row["actualdeparture"] > row["actualarrival"]:
             # Swap their values
             # row["actualdeparture"], row["actualarrival"] = row["actualarrival"], row["actualdeparture"]
-            pass
+            pass  # TODO: testing for baseline
 
         # Date/Time transformations
         # Use scheduleddeparture for date/month/year grouping to match baseline queries
@@ -56,10 +56,9 @@ def pre_process_flights(flights_source: SQLSource):
         # Check if flight is delayed (arrival > 15 minutes late from scheduled arrival)
         if not row["cancelled"]:
             delay_minutes = (row["actualarrival"] - row.get("scheduledarrival")).total_seconds() / 60
-            is_delayed = delay_minutes > 15
+            is_delayed = 15 < delay_minutes < 6*60
         else:
             is_delayed = False
-            delay_minutes = 0
         
         if is_delayed:
             row["TDM"] = (row["actualarrival"] - row["scheduledarrival"]).total_seconds() / 60
@@ -128,7 +127,7 @@ def stage_maintenance(maintenance_source: SQLSource) -> pd.DataFrame:
     return aggregated.sort_values(by=["aircraftregistration", "month"])
 
 
-def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str]):
+def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str], min_year: int, max_year: int):
     """
     Generator that processes post-flight reports row-by-row (memory efficient).
     Applies BR3 (validates aircraft), computes month.
@@ -141,10 +140,10 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
                        f"Aircraft {row['aircraftregistration']}, Reporteur {row['reporteurid']}")
             continue
         
-        # Ignore reports from before 2023, since there are no recorded flights.
-        # Otherwise we would get a Foreign Key violation. Even if we tried to fix it, there is no point
+        # Ignore reports from before 2023 or after 2024, since there are no recorded flights.
+        # Otherwise we would get a Foreign Key violation. Even if we added the key, there is no point
         # since the metrics to be computed (RRh, RRc...) need flight data (FH or TO).
-        if row["reportingdate"].year < 2023 or row["reportingdate"].year > 2024:
+        if not min_year <= row["reportingdate"].year <= max_year:
             continue
         
         # Date/Time transformation
@@ -158,7 +157,7 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
 
 def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str]) -> pd.DataFrame:
     """Stage, aggregate, and sort logbook reports. Pre-processes with BR3, month."""
-    reports_df = pd.DataFrame(list(pre_process_post_flight_reports(reports_source, valid_aircraft_codes)))
+    reports_df = pd.DataFrame(list(pre_process_post_flight_reports(reports_source, valid_aircraft_codes, 2023, 2024)))
     
     # Group by aircraft, reporteur, and month to count entries
     aggregated = reports_df.groupby(
@@ -177,7 +176,7 @@ def enhance_BR2(stagingDB) -> pd.DataFrame:
     Apply Business Rule 2 (BR-21): Two non-cancelled flights of the same aircraft cannot overlap.
     Fix: Remove the earlier overlapping flight and log it.
     """
-    return stagingDB
+    return stagingDB  # TODO: testing for baseline
     deletedIndexes = []
     prev_row = None
     
@@ -274,7 +273,7 @@ def prepare_fact_flight_monthly(aggregatedDB: pd.DataFrame, maintenanceDB: pd.Da
         aggregatedDB,
         maintenanceDB[["aircraftregistration", "month", "ADOSS", "ADOSU"]],
         on=["aircraftregistration", "month"],
-        how="outer"  # Changed from "left" to "outer" to include months with maintenance but no flights
+        how="outer"  # use "outer" to include months with maintenance but no flights
     ).fillna(0).rename(columns={  # Fill NaN values with 0
         "aircraftregistration": "aircraft_id",
         "month": "month_code",
@@ -306,7 +305,7 @@ def prepare_fact_logbook(logbookDB: pd.DataFrame) -> pd.DataFrame:
 # PHASE 5: Main Pipeline Functions
 # ==============================================================================
 
-def transform_flights(flights_source: SQLSource, aircraft_df: pd.DataFrame):
+def transform_flights(flights_source: SQLSource):
     """
     Complete transformation pipeline for flight data.
     Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month)
@@ -330,7 +329,7 @@ def transform_maintenance(maintenance_source: SQLSource):
     return stage_maintenance(maintenance_source)
 
 
-def transform_logbook(logbook_source: SQLSource, aircraft_df: pd.DataFrame, personnel_csv_data: CSVSource):
+def transform_logbook(logbook_source: SQLSource, personnel_csv_data: CSVSource, valid_aircraft_codes: set[str]):
     """
     Complete transformation pipeline for logbook data.
     Returns: (fact_logbook, dim_reporteur)
@@ -339,7 +338,6 @@ def transform_logbook(logbook_source: SQLSource, aircraft_df: pd.DataFrame, pers
     personnel_df['reporteurid'] = personnel_df['reporteurid'].astype(int)
     
     # Pass valid aircraft codes for BR3 validation
-    valid_aircraft_codes = set(aircraft_df["aircraft_reg_code"].tolist())
     logbook_df = stage_post_flight_reports(logbook_source, valid_aircraft_codes)
     
     fact_logbook = prepare_fact_logbook(logbook_df)
@@ -366,10 +364,8 @@ if __name__ == "__main__":
 
     # Test flight transformation
     print("Testing flight transformation...")
-    fact_daily, monthly_agg, dim_date, dim_month = transform_flights(
-        extract.flights_info(),
-        aircrafts_df
-    )
+    fact_daily, monthly_agg, dim_date, dim_month = transform_flights(extract.flights_info())
+
     print(f"Fact Daily shape: {fact_daily.shape}")
     print(fact_daily.head())
     print(f"\nMonthly Aggregation shape: {monthly_agg.shape}")
@@ -394,8 +390,9 @@ if __name__ == "__main__":
     print("Testing logbook transformation...")
     fact_logbook, dim_reporteur = transform_logbook(
         extract.post_flight_reports(),
-        aircrafts_df,
-        extract.maintenance_personnel_info()
+        extract.maintenance_personnel_info(),
+        set(aircrafts_df["aircraft_reg_code"].tolist())
+
     )
     print(f"Fact Logbook shape: {fact_logbook.shape}")
     print(fact_logbook.head())
