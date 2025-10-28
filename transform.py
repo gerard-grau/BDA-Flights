@@ -43,7 +43,6 @@ def pre_process_flights(flights_source: SQLSource):
 
         # Date/Time transformations
         # Use scheduleddeparture for date/month/year grouping to match baseline queries
-        # Baseline uses: DATE_PART('year', f.scheduleddeparture)
         row["date"] = build_dateCode(row["scheduleddeparture"])
         row["month"] = build_monthCode(row["scheduleddeparture"])
         
@@ -53,7 +52,7 @@ def pre_process_flights(flights_source: SQLSource):
         else:
             row["FH"] = 0
         
-        # Check if flight is delayed (arrival > 15 minutes late from scheduled arrival)
+        # Check if flight is delayed (arrival > 15 minutes late from scheduled arrival, and < 360))
         if not row["cancelled"]:
             delay_minutes = (row["actualarrival"] - row.get("scheduledarrival")).total_seconds() / 60
             is_delayed = 15 < delay_minutes < 6*60
@@ -65,7 +64,7 @@ def pre_process_flights(flights_source: SQLSource):
         else:
             row["TDM"] = 0
         
-        # Helper flags for efficient aggregation (replaces lambda functions)
+        # Helper flags for efficient aggregation
         row["is_takeoff"] = 0 if row["cancelled"] else 1  # For counting takeoffs (TO)
         row["is_delayed"] = 1 if is_delayed else 0  # For counting delays (DY)
         
@@ -80,6 +79,7 @@ def pre_process_flights(flights_source: SQLSource):
 def stage_flights(flights_source: SQLSource) -> pd.DataFrame:
     """Stage and sort flight data. Pre-processes with BR1, date, month, FH, TDM."""
     flights_df = pd.DataFrame(list(pre_process_flights(flights_source)))
+    # Sort in order to apply the business rule filtering (BR-21)
     return flights_df.sort_values(by=["aircraftregistration", "actualdeparture"])
 
 
@@ -127,7 +127,7 @@ def stage_maintenance(maintenance_source: SQLSource) -> pd.DataFrame:
     return aggregated.sort_values(by=["aircraftregistration", "month"])
 
 
-def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str], min_year: int, max_year: int):
+def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str], limit_dates):
     """
     Generator that processes post-flight reports row-by-row (memory efficient).
     Applies BR3 (validates aircraft), computes month.
@@ -140,10 +140,11 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
                        f"Aircraft {row['aircraftregistration']}, Reporteur {row['reporteurid']}")
             continue
         
-        # Ignore reports from before 2023 or after 2024, since there are no recorded flights.
-        # Otherwise we would get a Foreign Key violation. Even if we added the key, there is no point
-        # since the metrics to be computed (RRh, RRc...) need flight data (FH or TO).
-        if not min_year <= row["reportingdate"].year <= max_year:
+        # Ignore reports outside the date range of recorded flights.
+        # Otherwise we this data would be useless since it wouldn't be possible to compute any of the
+        # metrics (RRh, RRc), because they require flight data (FH, TO)
+        min_date, max_date = limit_dates
+        if not (min_date <= row["reportingdate"] <= max_date):
             continue
         
         # Date/Time transformation
@@ -155,9 +156,11 @@ def pre_process_post_flight_reports(reports_source: SQLSource, valid_aircraft_co
         yield row
 
 
-def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str]) -> pd.DataFrame:
-    """Stage, aggregate, and sort logbook reports. Pre-processes with BR3, month."""
-    reports_df = pd.DataFrame(list(pre_process_post_flight_reports(reports_source, valid_aircraft_codes, 2023, 2024)))
+def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: set[str], limt_dates) -> pd.DataFrame:
+    """
+    Stage, aggregate, and sort logbook reports. Pre-processes with BR3, month.
+    """
+    reports_df = pd.DataFrame(list(pre_process_post_flight_reports(reports_source, valid_aircraft_codes, limt_dates)))
     
     # Group by aircraft, reporteur, and month to count entries
     aggregated = reports_df.groupby(
@@ -165,6 +168,11 @@ def stage_post_flight_reports(reports_source: SQLSource, valid_aircraft_codes: s
     ).size().reset_index(name="logbook_entries")
     
     return aggregated.sort_values(by=["aircraftregistration", "reporteurid", "month"])
+
+
+def stage_aircrafts(aircraft_source: CSVSource) -> pd.DataFrame:
+    aircraft_df = pd.DataFrame(list(aircraft_source))
+    return aircraft_df, set(aircraft_df["aircraft_reg_code"].tolist())
 
 
 # ==============================================================================
@@ -209,7 +217,7 @@ def aggregate_by_aircraft_and_time(stagingDB: pd.DataFrame, time_granularity: Li
 
 
 # ==============================================================================
-# PHASE 4: Dimension and Fact Table Preparation
+# PHASE 4.1: Dimension Tables Preparation
 # ==============================================================================
 
 def prepare_dim_aircraft(aircraft_df: pd.DataFrame) -> pd.DataFrame:
@@ -256,6 +264,10 @@ def prepare_dim_month(dates_list: list) -> pd.DataFrame:
     }).drop_duplicates(subset=["month_code"])
 
 
+# ==============================================================================
+# PHASE 4.2: Fact Tables Preparation
+# ==============================================================================
+
 def prepare_fact_flight_daily(aggregatedDB: pd.DataFrame) -> pd.DataFrame:
     """Prepare daily flight fact table."""
     return aggregatedDB.rename(columns={
@@ -266,8 +278,10 @@ def prepare_fact_flight_daily(aggregatedDB: pd.DataFrame) -> pd.DataFrame:
     })[["aircraft_id", "date_code", "flight_hours", "flight_cycles"]]
 
 
-def prepare_fact_flight_monthly(aggregatedDB: pd.DataFrame, maintenanceDB: pd.DataFrame) -> pd.DataFrame:
+def prepare_fact_flight_monthly(aggregatedDB: pd.DataFrame, manteinance_source: SQLSource) -> pd.DataFrame:
     """Prepare monthly flight fact table with maintenance data merged."""
+    maintenanceDB = stage_maintenance(manteinance_source)
+    
     # Merge ADOSS and ADOSU from maintenanceDB using OUTER join to include maintenance-only months
     fact_monthly = pd.merge(
         aggregatedDB,
@@ -308,42 +322,48 @@ def prepare_fact_logbook(logbookDB: pd.DataFrame) -> pd.DataFrame:
 def transform_flights(flights_source: SQLSource):
     """
     Complete transformation pipeline for flight data.
-    Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month)
+    Returns: (fact_daily, fact_monthly_partial, dim_date, dim_month, min_date, max_date)
+    
+    The min_date and max_date are the date range of the flight data, used for filtering
+    logbook reports to ensure referential integrity.
     """
     df = stage_flights(flights_source)
     df = enhance_BR2(df)
+    
+    # Extract date range from flight data (based on scheduleddeparture)
+    # Convert date codes back to datetime for comparison
+    date_series = pd.to_datetime(df["date"])
+    limit_dates = (date_series.min().date(), date_series.max().date())
     
     fact_daily = prepare_fact_flight_daily(aggregate_by_aircraft_and_time(df, "date"))
     monthly_agg = aggregate_by_aircraft_and_time(df, "month")
     dim_date = prepare_dim_date(df["date"].dropna().tolist())
     dim_month = prepare_dim_month(df["month"].dropna().tolist())
-    
-    return fact_daily, monthly_agg, dim_date, dim_month
+    return fact_daily, monthly_agg, dim_date, dim_month, limit_dates
 
 
-def transform_maintenance(maintenance_source: SQLSource):
-    """
-    Complete transformation pipeline for maintenance data.
-    Returns: maintenance_monthly (with ADOSS and ADOSU aggregated by aircraft+month)
-    """
-    return stage_maintenance(maintenance_source)
-
-
-def transform_logbook(logbook_source: SQLSource, personnel_csv_data: CSVSource, valid_aircraft_codes: set[str]):
+def transform_logbook(logbook_source: SQLSource, personnel_csv_data: CSVSource, valid_aircraft_codes: set[str], dates: tuple):
     """
     Complete transformation pipeline for logbook data.
     Returns: (fact_logbook, dim_reporteur)
+    
+    Parameters:
+    - logbook_source: SQLSource with post-flight reports
+    - personnel_csv_data: CSVSource with maintenance personnel data
+    - valid_aircraft_codes: Set of valid aircraft registration codes
+    - min_date: Minimum date (datetime) from flight data
+    - max_date: Maximum date (datetime) from flight data
     """
     personnel_df = pd.DataFrame(list(personnel_csv_data))
     personnel_df['reporteurid'] = personnel_df['reporteurid'].astype(int)
     
-    # Pass valid aircraft codes for BR3 validation
-    logbook_df = stage_post_flight_reports(logbook_source, valid_aircraft_codes)
+    # Pass valid aircraft codes and date range for BR3 validation and temporal filtering
+    logbook_df = stage_post_flight_reports(logbook_source, valid_aircraft_codes, dates)
     
     fact_logbook = prepare_fact_logbook(logbook_df)
     dim_reporteur = prepare_dim_reporteur(logbook_df, personnel_df)
-    
     return fact_logbook, dim_reporteur
+
 
 
 # ==============================================================================
@@ -364,24 +384,18 @@ if __name__ == "__main__":
 
     # Test flight transformation
     print("Testing flight transformation...")
-    fact_daily, monthly_agg, dim_date, dim_month = transform_flights(extract.flights_info())
+    fact_daily, monthly_agg, dim_date, dim_month, limit_dates = transform_flights(extract.flights_info())
 
     print(f"Fact Daily shape: {fact_daily.shape}")
     print(fact_daily.head())
     print(f"\nMonthly Aggregation shape: {monthly_agg.shape}")
     print(monthly_agg.head())
-    
-    # Test maintenance transformation
-    print("\n" + "-" * 80)
-    print("Testing maintenance transformation...")
-    maintenance_monthly = transform_maintenance(extract.maintenance_info())
-    print(f"Maintenance Monthly shape: {maintenance_monthly.shape}")
-    print(maintenance_monthly.head())
-    
+    print(f"\nDate range: {limit_dates[0]} to {limit_dates[1]}")
+
     # Merge to create final monthly fact
     print("\n" + "-" * 80)
     print("Creating final monthly fact table...")
-    fact_monthly = prepare_fact_flight_monthly(monthly_agg, maintenance_monthly)
+    fact_monthly = prepare_fact_flight_monthly(monthly_agg, extract.maintenance_info())
     print(f"Fact Monthly shape: {fact_monthly.shape}")
     print(fact_monthly.head())
     
@@ -391,8 +405,8 @@ if __name__ == "__main__":
     fact_logbook, dim_reporteur = transform_logbook(
         extract.post_flight_reports(),
         extract.maintenance_personnel_info(),
-        set(aircrafts_df["aircraft_reg_code"].tolist())
-
+        set(aircrafts_df["aircraft_reg_code"].tolist()),
+        limit_dates
     )
     print(f"Fact Logbook shape: {fact_logbook.shape}")
     print(fact_logbook.head())
