@@ -350,8 +350,7 @@ def transform_logbook(logbook_source: SQLSource, personnel_csv_data: CSVSource, 
     - logbook_source: SQLSource with post-flight reports
     - personnel_csv_data: CSVSource with maintenance personnel data
     - valid_aircraft_codes: Set of valid aircraft registration codes
-    - min_date: Minimum date (datetime) from flight data
-    - max_date: Maximum date (datetime) from flight data
+    - dates: Minimum and maximum date (datetime) from flight data
     """
     personnel_df = pd.DataFrame(list(personnel_csv_data))
     personnel_df['reporteurid'] = personnel_df['reporteurid'].astype(int)
